@@ -1,4 +1,4 @@
-name: Build Tweak (clang only, no theos)
+name: Build Tweak (clang only)
 
 on:
   push:
@@ -21,26 +21,28 @@ jobs:
           set -e
           curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
           tar -xzf /tmp/sdks.tar.gz -C /tmp
-          ls /tmp/sdks-master | head -5
           SDK=$(ls -d /tmp/sdks-master/iPhoneOS*.sdk | sort -V | tail -1)
           echo "SDK=$SDK" >> $GITHUB_ENV
-          echo "选中 SDK: $SDK"
+          echo "SDK=$SDK"
+          ls "$SDK" | head -5
 
       - name: Compile dylib
         run: |
-          set -x
           cp Tweak.xm Tweak.m
           clang --version
+          ls /usr/bin/ld64* /usr/lib/llvm-*/bin/ld64* 2>/dev/null || true
           clang -target arm64-apple-ios15.0.0 \
                 -isysroot "$SDK" \
                 -fobjc-arc -O2 -dynamiclib \
+                -fuse-ld=lld \
                 -framework Foundation -framework UIKit -framework CoreFoundation \
-                -fuse-ld=lld \\
                 -Wl,-platform_version -Wl,ios -Wl,15.0 -Wl,15.0 \
                 -Wl,-undefined,dynamic_lookup \
-                -o XQAuthGateHook.dylib Tweak.m 2>&1 | tee build.log
-          ls -lh XQAuthGateHook.dylib || true
-          file XQAuthGateHook.dylib || true
+                -o XQAuthGateHook.dylib Tweak.m > build.log 2>&1 || true
+          echo "---- 结果 ----" | tee -a build.log
+          ls -lh XQAuthGateHook.dylib 2>&1 | tee -a build.log
+          file XQAuthGateHook.dylib 2>&1 | tee -a build.log
+          cat build.log
 
       - uses: actions/upload-artifact@v4
         if: always()

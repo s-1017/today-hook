@@ -64,9 +64,9 @@ static double verifyCode(NSString *raw) {
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
     if ([s hasPrefix:@"TODAY"]) s = [s substringFromIndex:5];
     NSData *bin = b32decode(s);
-    if (bin.length < 7) return -1;
-    NSData *body = [bin subdataWithRange:NSMakeRange(0, 2)];
-    NSData *mac = [bin subdataWithRange:NSMakeRange(2, 5)];
+    if (bin.length < 9) return -1;
+    NSData *body = [bin subdataWithRange:NSMakeRange(0, 4)];   // 2字节到期日 + 2字节随机
+    NSData *mac = [bin subdataWithRange:NSMakeRange(4, 5)];
     if (![mac isEqualToData:hmac5(body)]) return -1;
     const uint8_t *b = (const uint8_t *)body.bytes;
     NSInteger day = ((NSInteger)b[0] << 8) | b[1];

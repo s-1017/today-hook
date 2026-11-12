@@ -11,17 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Theos (Linux, Orion enabled)
+      - name: apt update
+        run: sudo apt-get update -y
+
+      - name: Setup Theos
         uses: Randomblock1/theos-action@main
 
       - name: Build
         run: |
-          export PATH="${{ github.workspace }}/theos/bin:$PATH"
+          export PATH="$GITHUB_WORKSPACE/theos/bin:$PATH"
           make clean > build.log 2>&1 || true
           make >> build.log 2>&1 || true
-          echo "---- dylibs ----" >> build.log
-          find .theos/obj -name "*.dylib" -not -path "*dSYM*" -exec ls -lh {} \; >> build.log 2>&1
-          tail -30 build.log
+          find .theos/obj -name '*.dylib' -not -path '*dSYM*' -exec ls -lh {} \; >> build.log 2>&1
+          tail -40 build.log
 
       - uses: actions/upload-artifact@v4
         if: always()

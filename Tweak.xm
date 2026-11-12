@@ -240,11 +240,8 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (gLockWindow) return;                 // 已经上锁，不重复
     gAppWindow = (UIWindow *)self;
 
-    // 已保存的卡密仍然有效 → 直接放行
-    if (alreadyValid()) {
-        NSLog(@"[TodayHook] 本地卡密有效，直接进入");
-        return;
-    }
+    // 每次启动都要过验证页（卡密会自动填入，点一下「验证」即可）
+    (void)alreadyValid;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{

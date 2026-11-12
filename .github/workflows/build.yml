@@ -11,15 +11,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: apt update
-        run: sudo apt-get update -y
+      - name: Setup Theos (manual linux toolchain)
+        run: |
+          set -e
+          export THEOS=$HOME/theos
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
+          tar -xzf /tmp/sdks.tar.gz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" || true
+          ls "$THEOS/sdks" | head -3
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
 
-      - name: Setup Theos
-        uses: Randomblock1/theos-action@main
+      - name: Install linux toolchain
+        run: |
+          set -e
+          curl -fsSL -o /tmp/tc.tar.xz https://github.com/theos/toolchain/releases/download/linux-x86_64-3015/linux-x86_64.tar.xz || \
+          curl -fsSL -o /tmp/tc.tar.xz https://github.com/theos/toolchain/releases/latest/download/linux-x86_64.tar.xz
+          ls -lh /tmp/tc.tar.xz
+          mkdir -p "$HOME/theos/toolchain"
+          tar -xJf /tmp/tc.tar.xz -C "$HOME/theos/toolchain"
+          ls "$HOME/theos/toolchain"
+          find "$HOME/theos/toolchain" -maxdepth 2 -type d | head -10
 
       - name: Build
         run: |
-          export PATH="$GITHUB_WORKSPACE/theos/bin:$PATH"
+          export PATH="$HOME/theos/bin:$PATH"
           make clean > build.log 2>&1 || true
           make >> build.log 2>&1 || true
           find .theos/obj -name '*.dylib' -not -path '*dSYM*' -exec ls -lh {} \; >> build.log 2>&1

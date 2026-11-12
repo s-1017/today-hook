@@ -61,7 +61,7 @@ static NSInteger verifyCode(NSString *raw) {
     NSData *mac  = [bin subdataWithRange:NSMakeRange(2, 5)];
     if (![mac isEqualToData:hmac5(body)]) return -1;
 
-    const uint8_t *b = body.bytes;
+    const uint8_t *b = (const uint8_t *)body.bytes;
     NSInteger day = ((NSInteger)b[0] << 8) | b[1];
     NSInteger epochDay = day + kEpochDay;
     NSInteger today = (NSInteger)([[NSDate date] timeIntervalSince1970] / 86400.0);

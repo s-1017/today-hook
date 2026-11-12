@@ -19,19 +19,23 @@ jobs:
           curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
           tar -xzf /tmp/sdks.tar.gz -C /tmp
           cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" || true
-          ls "$HOME/theos/sdks" | head
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
 
       - name: Build
         run: |
-          make clean || true
-          make
-          echo "---- dylib ----"
-          find . -name "*.dylib" -exec ls -lh {} \;
+          set +e
+          make clean > build.log 2>&1
+          make >> build.log 2>&1
+          echo "EXIT=$?" >> build.log
+          find . -name "*.dylib" -exec ls -lh {} \; >> build.log 2>&1
+          tail -60 build.log
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: dylib
-          path: .theos/obj/**/*.dylib
+          name: build-output
+          path: |
+            build.log
+            .theos/obj/**/*.dylib
           if-no-files-found: warn

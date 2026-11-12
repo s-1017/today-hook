@@ -2,36 +2,32 @@ name: Build Tweak
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: macos-14
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 现成 Action：在没有 Mac 的 Linux 上装好 Theos 工具链
-      - name: 安装 Theos 工具链
-        uses: Randomblock1/theos-action@main
-        with:
-          theos-sdk: latest
+      - name: Install Theos
+        run: |
+          export THEOS=$HOME/theos
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          ls $HOME/theos || true
 
-      - name: 编译
+      - name: Build
         run: |
           make clean || true
-          make package FINALPACKAGE=1 || make
-          echo "---- 产物 ----"
-          find . -name "*.dylib" -exec ls -lh {} \; || true
-          find . -name "*.deb" -exec ls -lh {} \; || true
+          make
+          echo "---- dylib ----"
+          find . -name "*.dylib" -exec ls -lh {} \;
 
-      - name: 上传 dylib
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: XQAuthGateHook-dylib
-          path: |
-            .theos/obj/**/*.dylib
-            packages/*.deb
+          name: dylib
+          path: .theos/obj/**/*.dylib
           if-no-files-found: warn

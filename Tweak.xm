@@ -224,9 +224,11 @@ static void LCGuardTick(void) {
     if (!gLockVC || !gLockVC.view.window) {
         LCShowLock();
     }
-    // 未验证时禁止操作底层窗口
+    // 未验证时禁止操作底层窗口（但不能禁用承载验证界面的那个窗口）
     for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        if (win.rootViewController != gLockVC) win.userInteractionEnabled = NO;
+        BOOL containsLock = (gLockVC && gLockVC.view && [gLockVC.view isDescendantOfView:win]);
+        if (!containsLock) win.userInteractionEnabled = NO;
+        else win.userInteractionEnabled = YES;      // 承载锁屏的窗口必须可交互
     }
 }
 

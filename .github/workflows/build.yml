@@ -7,47 +7,27 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Theos
-        run: |
-          set -e
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          mkdir -p "$HOME/theos/sdks"
-          curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
-          tar -xzf /tmp/sdks.tar.gz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" || true
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
-          brew install ldid || true
-          which ldid || ls "$HOME/theos/bin" || true
+      - name: Setup Theos (Linux, Orion enabled)
+        uses: Randomblock1/theos-action@main
 
       - name: Build
         run: |
-          export PATH="$HOME/theos/bin:$PATH"
+          export PATH="${{ github.workspace }}/theos/bin:$PATH"
           make clean > build.log 2>&1 || true
           make >> build.log 2>&1 || true
-          echo "---- 编译产物 ----" >> build.log
+          echo "---- dylibs ----" >> build.log
           find .theos/obj -name "*.dylib" -not -path "*dSYM*" -exec ls -lh {} \; >> build.log 2>&1
-          A=.theos/obj/debug/arm64/XQAuthGateHook.dylib
-          B=.theos/obj/debug/arm64e/XQAuthGateHook.dylib
-          if [ -f "$A" ] && [ -f "$B" ]; then
-            lipo -create -output XQAuthGateHook.dylib "$A" "$B"
-          elif [ -f "$B" ]; then
-            cp "$B" XQAuthGateHook.dylib
-          elif [ -f "$A" ]; then
-            cp "$A" XQAuthGateHook.dylib
-          fi
-          ls -lh XQAuthGateHook.dylib >> build.log 2>&1 || true
-          tail -20 build.log
+          tail -30 build.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dylib-final
+          name: out
           path: |
-            XQAuthGateHook.dylib
             build.log
+            .theos/obj/**/*.dylib
           if-no-files-found: warn

@@ -7,7 +7,6 @@ TWEAK_NAME = XQAuthGateHook
 XQAuthGateHook_FILES = Tweak.xm
 XQAuthGateHook_CFLAGS = -fobjc-arc
 XQAuthGateHook_FRAMEWORKS = Foundation UIKit
-XQAuthGateHook_LIBRARIES = crypto
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

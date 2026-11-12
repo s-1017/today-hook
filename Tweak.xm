@@ -19,6 +19,8 @@ static UIWindow *gAppWindow = nil;
 static NSTimer *gGuard = nil;
 static BOOL gInHook = NO;
 static BOOL gUnlocked = NO;
+@class LCLockVC;
+static LCLockVC *gLockVC = nil;
 
 #pragma mark - Base32 / HMAC
 
@@ -202,17 +204,13 @@ static void LCUnlock(void) {
     gUnlocked = YES;
     if (gGuard) { [gGuard invalidate]; gGuard = nil; }
     gInHook = YES;
-    UIWindow *w = gLockWindow;
-    gLockWindow = nil;
-    if (w) {
-        [w.rootViewController dismissViewControllerAnimated:NO completion:nil];
-        w.rootViewController = nil;
-        w.hidden = YES;
-    }
+    LCLockVC *vc = gLockVC;
+    gLockVC = nil;
+    if (vc) [vc dismissViewControllerAnimated:NO completion:nil];
     for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
         win.userInteractionEnabled = YES;
-        if (win != w && win.rootViewController) { [win makeKeyAndVisible]; break; }
     }
+    if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
     NSLog(@"[TodayHook] 已解锁");
 }
@@ -222,18 +220,13 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    if (!gLockWindow) { LCShowLock(); return; }
-
-    // 锁屏被隐藏 / 被夺走 key → 抢回来
-    if (gLockWindow.hidden) gLockWindow.hidden = NO;
-    if (![gLockWindow isKeyWindow]) {
-        gInHook = YES;
-        [gLockWindow makeKeyAndVisible];
-        gInHook = NO;
+    // 锁屏被关掉 / 被移除 → 立刻重新呈现
+    if (!gLockVC || !gLockVC.view.window) {
+        LCShowLock();
     }
     // 未验证时禁止操作底层窗口
     for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        if (win != gLockWindow) win.userInteractionEnabled = NO;
+        if (win.rootViewController != gLockVC) win.userInteractionEnabled = NO;
     }
 }
 
@@ -245,18 +238,32 @@ static void LCStartGuard(void) {
 }
 
 static void LCShowLock(void) {
-    if (gUnlocked || gLockWindow) return;
+    if (gUnlocked) return;
+    if (gLockVC && gLockVC.view.window) return;      // 已经在显示
+
+    // 找 App 自己的根视图控制器（跟着 UIWindowScene 走，不会被场景踢掉）
+    UIViewController *host = gAppWindow.rootViewController;
+    if (!host) {
+        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+            if (w.rootViewController) { host = w.rootViewController; break; }
+        }
+    }
+    if (!host) return;
+    while (host.presentedViewController &&
+           ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
+        host = host.presentedViewController;
+    }
+
     gInHook = YES;
-    UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    w.windowLevel = UIWindowLevelAlert + 10000;
-    w.backgroundColor = [UIColor blackColor];
-    w.rootViewController = [[LCLockVC alloc] init];
-    w.hidden = NO;
-    gLockWindow = w;
-    [w makeKeyAndVisible];
+    LCLockVC *vc = [[LCLockVC alloc] init];
+    vc.modalPresentationStyle = UIModalPresentationFullScreen;
+    vc.modalTransitionStyle = UIModalTransitionStyleCoverVertical;
+    vc.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1.0];
+    gLockVC = vc;
+    [host presentViewController:vc animated:NO completion:nil];
     gInHook = NO;
     LCStartGuard();
-    NSLog(@"[TodayHook] 锁屏已显示 (level=%d)", (int)w.windowLevel);
+    NSLog(@"[TodayHook] 锁屏已呈现 (host=%@)", NSStringFromClass([host class]));
 }
 
 #pragma mark - Hook

@@ -21,21 +21,33 @@ jobs:
           cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" || true
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          brew install ldid || true
+          which ldid || ls "$HOME/theos/bin" || true
 
       - name: Build
         run: |
-          set +e
-          make clean > build.log 2>&1
-          make >> build.log 2>&1
-          echo "EXIT=$?" >> build.log
-          find . -name "*.dylib" -exec ls -lh {} \; >> build.log 2>&1
-          tail -60 build.log
+          export PATH="$HOME/theos/bin:$PATH"
+          make clean > build.log 2>&1 || true
+          make >> build.log 2>&1 || true
+          echo "---- 编译产物 ----" >> build.log
+          find .theos/obj -name "*.dylib" -not -path "*dSYM*" -exec ls -lh {} \; >> build.log 2>&1
+          A=.theos/obj/debug/arm64/XQAuthGateHook.dylib
+          B=.theos/obj/debug/arm64e/XQAuthGateHook.dylib
+          if [ -f "$A" ] && [ -f "$B" ]; then
+            lipo -create -output XQAuthGateHook.dylib "$A" "$B"
+          elif [ -f "$B" ]; then
+            cp "$B" XQAuthGateHook.dylib
+          elif [ -f "$A" ]; then
+            cp "$A" XQAuthGateHook.dylib
+          fi
+          ls -lh XQAuthGateHook.dylib >> build.log 2>&1 || true
+          tail -20 build.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: build-output
+          name: dylib-final
           path: |
+            XQAuthGateHook.dylib
             build.log
-            .theos/obj/**/*.dylib
           if-no-files-found: warn

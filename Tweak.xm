@@ -20,6 +20,7 @@ static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 static UIWindow *gLockWindow = nil;
 static BOOL gInHook = NO;
+static BOOL gUnlocked = NO;      // 本次启动已解锁 → 永不再锁
 
 #pragma mark - Base32 / HMAC
 
@@ -207,15 +208,19 @@ static NSString *fmtTime(double ts) {
 }
 
 - (void)unlock {
-    if (gLockWindow) {
-        gInHook = YES;
-        gLockWindow.hidden = YES;
-        gLockWindow = nil;
-        gInHook = NO;
-        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
-            if (w != gLockWindow && w.rootViewController) { [w makeKeyAndVisible]; break; }
-        }
+    if (!gLockWindow) return;
+    gUnlocked = YES;                 // 关键：先置标记，杜绝重入重锁
+    gInHook = YES;
+    UIWindow *w = gLockWindow;
+    gLockWindow = nil;
+    w.hidden = YES;
+    w.rootViewController = nil;
+    // 把 App 自己的窗口重新设为 key（gUnlocked 已生效，不会再次上锁）
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        if (win != w && win.rootViewController) { [win makeKeyAndVisible]; break; }
     }
+    gInHook = NO;
+    NSLog(@"[TodayHook] 已解锁");
 }
 
 @end
@@ -236,24 +241,23 @@ static UIWindow *gAppWindow = nil;
 
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
+    if (gUnlocked) return;                   // 已解锁 → 永不重锁
     if (gInHook) return;
-    if (gLockWindow) return;                 // 已经上锁，不重复
+    if (gLockWindow) return;                 // 已经上锁
     gAppWindow = (UIWindow *)self;
 
     // 每次启动都要过验证页（卡密会自动填入，点一下「验证」即可）
-    (void)alreadyValid;
-
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (gLockWindow) return;
+        if (gUnlocked || gLockWindow) return;
         gInHook = YES;
         UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         w.windowLevel = UIWindowLevelAlert + 100;
         w.backgroundColor = [UIColor blackColor];
         w.rootViewController = [[LCLockVC alloc] init];
         w.hidden = NO;
-        [w makeKeyAndVisible];
         gLockWindow = w;
+        [w makeKeyAndVisible];
         gInHook = NO;
         NSLog(@"[TodayHook] 锁屏已显示");
     });

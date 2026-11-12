@@ -1,23 +1,19 @@
-// Tweak.xm —— Today 自有授权层（短卡密 + HMAC 校验 + 到期锁死）
+// Tweak.xm —— Today 自有授权层（零依赖版：只用 ObjC runtime，不需要 Substrate/Orion）
 //
-// 卡密格式：TODAY-XXXXX-XXXXX-XXXXX（15 个 Base32 字符，去掉分隔符是 15 位）
-//   内部 = Base32( 2 字节到期日(自2020-01-01起的天数) + 5 字节 HMAC-SHA256 截断 )
-//   验签 = 用内置密钥重算 HMAC，比对后 5 字节（40 位）
-//   到期 = 到期日 < 今天 → 提示续费并退出
-//
-// 编译产物：XQAuthGateHook.dylib → TrollFools 注入 Today
+// 卡密格式：TODAY-XXXX-XXXX-XXXX
+//   = Base32( 2字节到期日(自2020-01-01) + 5字节 HMAC-SHA256 截断 )
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonHMAC.h>
 #import <objc/runtime.h>
 
-// ====== 你的密钥（生成器里必须用同一个）======
 static NSString *const kSecret = @"TODAY-HMAC-2026-ChAnGeMe-9f3a7c";
 static NSString *const kStoreKey = @"_today_lic_v1";
-static const int kEpochDay = 18262;      // 2020-01-01 的天数
-
+static const int kEpochDay = 18262;
 static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+#pragma mark - 卡密校验
 
 static NSData *b32decode(NSString *s) {
     NSMutableArray *bits = [NSMutableArray array];
@@ -48,7 +44,6 @@ static NSData *hmac5(NSData *msg) {
     return [NSData dataWithBytes:mac length:5];
 }
 
-// 返回到期日(自1970天数)；-1 无效，-2 已过期
 static NSInteger verifyCode(NSString *raw) {
     if (!raw.length) return -1;
     NSString *s = [[raw stringByTrimmingCharactersInSet:
@@ -56,11 +51,9 @@ static NSInteger verifyCode(NSString *raw) {
     if ([s hasPrefix:@"TODAY"]) s = [s substringFromIndex:5];
     NSData *bin = b32decode(s);
     if (bin.length < 7) return -1;
-
     NSData *body = [bin subdataWithRange:NSMakeRange(0, 2)];
-    NSData *mac  = [bin subdataWithRange:NSMakeRange(2, 5)];
+    NSData *mac = [bin subdataWithRange:NSMakeRange(2, 5)];
     if (![mac isEqualToData:hmac5(body)]) return -1;
-
     const uint8_t *b = (const uint8_t *)body.bytes;
     NSInteger day = ((NSInteger)b[0] << 8) | b[1];
     NSInteger epochDay = day + kEpochDay;
@@ -82,6 +75,8 @@ static NSInteger loadLicense(void) {
     return day < today ? -2 : day;
 }
 
+#pragma mark - UI
+
 static UIViewController *topVC(UIWindow *win) {
     UIViewController *vc = win.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
@@ -90,8 +85,8 @@ static UIViewController *topVC(UIWindow *win) {
 
 static void askForCode(UIWindow *win);
 
-static void showOK(UIViewController *vc, NSString *title, NSString *msg) {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg
+static void showOK(UIViewController *vc, NSString *t, NSString *m) {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:t message:m
                                                        preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [vc presentViewController:a animated:YES completion:nil];
@@ -105,10 +100,9 @@ static void askForCode(UIWindow *win) {
                                             message:@"请输入卖家给你的卡密"
                                      preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"TODAY-XXXXX-XXXXX-XXXXX";
+        tf.placeholder = @"TODAY-XXXX-XXXX-XXXX";
         tf.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
     [ac addAction:[UIAlertAction actionWithTitle:@"验证" style:UIAlertActionStyleDefault
                                         handler:^(UIAlertAction *a) {
@@ -116,9 +110,9 @@ static void askForCode(UIWindow *win) {
         NSInteger day = verifyCode(code);
         if (day > 0) {
             saveLicense(day, code);
-            NSDate *d = [NSDate dateWithTimeIntervalSince1970:day * 86400.0];
             NSDateFormatter *f = [[NSDateFormatter alloc] init];
             f.dateFormat = @"yyyy-MM-dd";
+            NSDate *d = [NSDate dateWithTimeIntervalSince1970:day * 86400.0];
             NSLog(@"[TodayHook] 激活成功 到期 %@", [f stringFromDate:d]);
             showOK(topVC(win), @"激活成功", [NSString stringWithFormat:@"有效期至 %@", [f stringFromDate:d]]);
         } else {
@@ -138,40 +132,54 @@ static void askForCode(UIWindow *win) {
     [vc presentViewController:ac animated:YES completion:nil];
 }
 
-// ====== 屏蔽原闸门（我们的层接管）======
-%hook XQGate
-- (void)showGate:(id)x { }
-- (void)startHeartbeat { }
-- (void)doBeat { }
-%end
-
-%hook XQEngine
-+ (id)verifyOfflineCode:(id)code out:(id *)out {
-    NSDictionary *d = @{ @"exp": @(4102444800.0), @"pid": @"today", @"dev": @"" };
-    if (out) *out = d;
-    return d;
+static void checkLicense(UIWindow *win) {
+    NSInteger st = loadLicense();
+    if (st == -2) {
+        UIViewController *vc = topVC(win);
+        if (!vc) return;
+        UIAlertController *exp =
+            [UIAlertController alertControllerWithTitle:@"授权已到期"
+                                                message:@"请联系卖家续费"
+                                         preferredStyle:UIAlertControllerStyleAlert];
+        [exp addAction:[UIAlertAction actionWithTitle:@"退出" style:UIAlertActionStyleDefault
+                                              handler:^(UIAlertAction *a) { exit(0); }]];
+        [vc presentViewController:exp animated:YES completion:nil];
+        return;
+    }
+    if (st < 0) askForCode(win);
 }
-%end
 
-// ====== 启动后自检 ======
-%hook UIWindow
-- (void)makeKeyAndVisible {
-    %orig;
+#pragma mark - Hook（纯 runtime，无第三方依赖）
+
+static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
+
+static void my_makeKeyAndVisible(id self, SEL _cmd) {
+    if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        NSInteger st = loadLicense();
-        if (st == -2) {
-            UIViewController *vc = topVC(self);
-            UIAlertController *exp =
-                [UIAlertController alertControllerWithTitle:@"授权已到期"
-                                                    message:@"请联系卖家续费"
-                                             preferredStyle:UIAlertControllerStyleAlert];
-            [exp addAction:[UIAlertAction actionWithTitle:@"退出" style:UIAlertActionStyleDefault
-                                                  handler:^(UIAlertAction *a) { exit(0); }]];
-            [vc presentViewController:exp animated:YES completion:nil];
-            return;
-        }
-        if (st < 0) askForCode(self);
+        checkLicense((UIWindow *)self);
     });
 }
-%end
+
+static void hookIfExists(const char *cls, SEL sel, IMP imp) {
+    Class c = objc_getClass(cls);
+    if (!c) return;
+    Method m = class_getInstanceMethod(c, sel);
+    if (m) method_setImplementation(m, imp);
+}
+
+static void gate_showGate(id self, SEL _cmd, id x) { }
+static void gate_noop(id self, SEL _cmd) { }
+
+__attribute__((constructor)) static void todayhook_init(void) {
+    Class wc = objc_getClass("UIWindow");
+    Method m = wc ? class_getInstanceMethod(wc, @selector(makeKeyAndVisible)) : NULL;
+    if (m) {
+        orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_makeKeyAndVisible);
+    }
+    hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
+    hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
+    hookIfExists("XQGate", @selector(doBeat), (IMP)gate_noop);
+    NSLog(@"[TodayHook] loaded, window-hook=%d", orig_makeKeyAndVisible != NULL);
+}

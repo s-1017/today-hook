@@ -1,7 +1,12 @@
-// Tweak.xm —— Today 自有授权层（零依赖版：只用 ObjC runtime，不需要 Substrate/Orion）
+// Tweak.xm —— Today 自有授权层（v3：全屏锁定 + 卡密记忆 + 年月日时分秒）
 //
-// 卡密格式：TODAY-XXXX-XXXX-XXXX
+// 卡密：TODAY-XXXX-XXXX-XXXX
 //   = Base32( 2字节到期日(自2020-01-01) + 5字节 HMAC-SHA256 截断 )
+//
+// v3 改动：
+//   1) 启动即用独立 UIWindow 全屏锁定，HUD 完全不可见，输完卡密才放行
+//   2) 卡密保存在本地，下次启动自动填入，点一下「验证」即可
+//   3) 到期时间显示到「年月日时分秒」
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -10,10 +15,13 @@
 
 static NSString *const kSecret = @"TODAY-HMAC-2026-ChAnGeMe-9f3a7c";
 static NSString *const kStoreKey = @"_today_lic_v1";
-static const int kEpochDay = 18262;
+static const int kEpochDay = 18262;          // 2020-01-01 距 1970 的天数
 static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-#pragma mark - 卡密校验
+static UIWindow *gLockWindow = nil;
+static BOOL gInHook = NO;
+
+#pragma mark - Base32 / HMAC
 
 static NSData *b32decode(NSString *s) {
     NSMutableArray *bits = [NSMutableArray array];
@@ -44,7 +52,8 @@ static NSData *hmac5(NSData *msg) {
     return [NSData dataWithBytes:mac length:5];
 }
 
-static NSInteger verifyCode(NSString *raw) {
+// 返回到期时间戳（秒）；-1 无效，-2 已过期
+static double verifyCode(NSString *raw) {
     if (!raw.length) return -1;
     NSString *s = [[raw stringByTrimmingCharactersInSet:
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
@@ -56,108 +65,200 @@ static NSInteger verifyCode(NSString *raw) {
     if (![mac isEqualToData:hmac5(body)]) return -1;
     const uint8_t *b = (const uint8_t *)body.bytes;
     NSInteger day = ((NSInteger)b[0] << 8) | b[1];
-    NSInteger epochDay = day + kEpochDay;
-    NSInteger today = (NSInteger)([[NSDate date] timeIntervalSince1970] / 86400.0);
-    return epochDay < today ? -2 : epochDay;
+    double expireTs = (double)(day + kEpochDay) * 86400.0 + 86399.0;   // 当日 23:59:59
+    if (expireTs < [[NSDate date] timeIntervalSince1970]) return -2;
+    return expireTs;
 }
 
-static void saveLicense(NSInteger epochDay, NSString *code) {
+#pragma mark - 本地保存
+
+static void saveLicense(NSString *code, double expireTs) {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
-    [u setObject:@{@"d": @(epochDay), @"c": code} forKey:kStoreKey];
+    [u setObject:@{@"c": code ?: @"", @"e": @(expireTs)} forKey:kStoreKey];
     [u synchronize];
 }
 
-static NSInteger loadLicense(void) {
+static NSString *savedCode(void) {
     NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
-    if (![d isKindOfClass:[NSDictionary class]]) return -1;
-    NSInteger day = [d[@"d"] integerValue];
-    NSInteger today = (NSInteger)([[NSDate date] timeIntervalSince1970] / 86400.0);
-    return day < today ? -2 : day;
+    if (![d isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *c = d[@"c"];
+    return [c isKindOfClass:[NSString class]] ? c : nil;
 }
 
-#pragma mark - UI
-
-static UIViewController *topVC(UIWindow *win) {
-    UIViewController *vc = win.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    return vc;
+static double savedExpire(void) {
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    if (![d isKindOfClass:[NSDictionary class]]) return 0;
+    return [d[@"e"] doubleValue];
 }
 
-static void askForCode(UIWindow *win);
-
-static void showOK(UIViewController *vc, NSString *t, NSString *m) {
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:t message:m
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [vc presentViewController:a animated:YES completion:nil];
+static NSString *fmtTime(double ts) {
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
 }
 
-static void askForCode(UIWindow *win) {
-    UIViewController *vc = topVC(win);
-    if (!vc) return;
-    UIAlertController *ac =
-        [UIAlertController alertControllerWithTitle:@"激活你的设备"
-                                            message:@"请输入卖家给你的卡密"
-                                     preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"TODAY-XXXX-XXXX-XXXX";
-        tf.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"验证" style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction *a) {
-        NSString *code = ac.textFields.firstObject.text;
-        NSInteger day = verifyCode(code);
-        if (day > 0) {
-            saveLicense(day, code);
-            NSDateFormatter *f = [[NSDateFormatter alloc] init];
-            f.dateFormat = @"yyyy-MM-dd";
-            NSDate *d = [NSDate dateWithTimeIntervalSince1970:day * 86400.0];
-            NSLog(@"[TodayHook] 激活成功 到期 %@", [f stringFromDate:d]);
-            showOK(topVC(win), @"激活成功", [NSString stringWithFormat:@"有效期至 %@", [f stringFromDate:d]]);
-        } else {
-            NSString *msg = (day == -2) ? @"该卡密已过期" : @"卡密无效，请检查是否输错";
-            UIAlertController *bad =
-                [UIAlertController alertControllerWithTitle:@"验证失败" message:msg
-                                             preferredStyle:UIAlertControllerStyleAlert];
-            [bad addAction:[UIAlertAction actionWithTitle:@"重试" style:UIAlertActionStyleDefault
-                                                  handler:^(UIAlertAction *x) { askForCode(win); }]];
-            [bad addAction:[UIAlertAction actionWithTitle:@"退出" style:UIAlertActionStyleCancel
-                                                  handler:^(UIAlertAction *x) { exit(0); }]];
-            [topVC(win) presentViewController:bad animated:YES completion:nil];
-        }
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel
-                                        handler:^(UIAlertAction *a) { exit(0); }]];
-    [vc presentViewController:ac animated:YES completion:nil];
+#pragma mark - 锁定界面
+
+@interface LCLockVC : UIViewController <UITextFieldDelegate>
+@property (nonatomic, strong) UITextField *field;
+@property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UIButton *btn;
+@end
+
+@implementation LCLockVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1.0];
+
+    CGFloat w = self.view.bounds.size.width;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 34)];
+    title.center = CGPointMake(w / 2, self.view.bounds.size.height * 0.30);
+    title.text = @"安全模块加载中…";
+    title.textColor = [UIColor whiteColor];
+    title.font = [UIFont boldSystemFontOfSize:22];
+    title.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:title];
+
+    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 20)];
+    sub.center = CGPointMake(w / 2, title.center.y + 34);
+    sub.text = @"请输入卖家给你的卡密后继续";
+    sub.textColor = [UIColor colorWithWhite:0.65 alpha:1];
+    sub.font = [UIFont systemFontOfSize:14];
+    sub.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:sub];
+
+    CGFloat fw = w - 80;
+    _field = [[UITextField alloc] initWithFrame:CGRectMake(40, sub.center.y + 40, fw, 46)];
+    _field.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
+    _field.layer.cornerRadius = 10;
+    _field.layer.borderWidth = 1;
+    _field.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1].CGColor;
+    _field.textColor = [UIColor whiteColor];
+    _field.tintColor = [UIColor whiteColor];
+    _field.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
+    _field.textAlignment = NSTextAlignmentCenter;
+    _field.placeholder = @"TODAY-XXXX-XXXX-XXXX";
+    _field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+    _field.autocorrectionType = UITextAutocorrectionTypeNo;
+    _field.returnKeyType = UIReturnKeyDone;
+    _field.delegate = self;
+    _field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 1)];
+    _field.leftViewMode = UITextFieldViewModeAlways;
+    [self.view addSubview:_field];
+
+    // 本地已保存的卡密 → 自动填入
+    NSString *saved = savedCode();
+    if (saved.length) _field.text = saved;
+
+    _btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _btn.frame = CGRectMake(40, _field.frame.origin.y + 62, fw, 48);
+    _btn.backgroundColor = [UIColor colorWithRed:0.20 green:0.53 blue:0.98 alpha:1];
+    _btn.layer.cornerRadius = 10;
+    [_btn setTitle:@"验 证" forState:UIControlStateNormal];
+    [_btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _btn.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [_btn addTarget:self action:@selector(doVerify) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_btn];
+
+    _status = [[UILabel alloc] initWithFrame:CGRectMake(0, _btn.frame.origin.y + 66, w - 60, 44)];
+    _status.center = CGPointMake(w / 2, _status.center.y);
+    _status.numberOfLines = 0;
+    _status.textColor = [UIColor colorWithWhite:0.6 alpha:1];
+    _status.font = [UIFont systemFontOfSize:13];
+    _status.textAlignment = NSTextAlignmentCenter;
+    _status.text = saved.length ? @"已读取上次的卡密，点击「验证」进入" : @"";
+    [self.view addSubview:_status];
+
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(0, self.view.bounds.size.height - 60, w, 20)];
+    tip.text = @"授权有效期以卡密为准";
+    tip.textColor = [UIColor colorWithWhite:0.35 alpha:1];
+    tip.font = [UIFont systemFontOfSize:11];
+    tip.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:tip];
 }
 
-static void checkLicense(UIWindow *win) {
-    NSInteger st = loadLicense();
-    if (st == -2) {
-        UIViewController *vc = topVC(win);
-        if (!vc) return;
-        UIAlertController *exp =
-            [UIAlertController alertControllerWithTitle:@"授权已到期"
-                                                message:@"请联系卖家续费"
-                                         preferredStyle:UIAlertControllerStyleAlert];
-        [exp addAction:[UIAlertAction actionWithTitle:@"退出" style:UIAlertActionStyleDefault
-                                              handler:^(UIAlertAction *a) { exit(0); }]];
-        [vc presentViewController:exp animated:YES completion:nil];
-        return;
+- (BOOL)textFieldShouldReturn:(UITextField *)tf {
+    [tf resignFirstResponder];
+    [self doVerify];
+    return YES;
+}
+
+- (void)doVerify {
+    [_field resignFirstResponder];
+    NSString *code = _field.text;
+    double ts = verifyCode(code);
+    if (ts > 0) {
+        saveLicense([[code stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString], ts);
+        _status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
+        _status.text = [NSString stringWithFormat:@"验证通过\n有效期至 %@", fmtTime(ts)];
+        [_btn setTitle:@"进入" forState:UIControlStateNormal];
+        [_btn removeTarget:self action:@selector(doVerify) forControlEvents:UIControlEventTouchUpInside];
+        [_btn addTarget:self action:@selector(unlock) forControlEvents:UIControlEventTouchUpInside];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [self unlock]; });
+    } else {
+        _status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        _status.text = (ts == -2) ? @"该卡密已过期，请联系卖家续费"
+                                  : @"卡密无效，请检查是否输错";
     }
-    if (st < 0) askForCode(win);
 }
 
-#pragma mark - Hook（纯 runtime，无第三方依赖）
+- (void)unlock {
+    if (gLockWindow) {
+        gInHook = YES;
+        gLockWindow.hidden = YES;
+        gLockWindow = nil;
+        gInHook = NO;
+        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+            if (w != gLockWindow && w.rootViewController) { [w makeKeyAndVisible]; break; }
+        }
+    }
+}
+
+@end
+
+#pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
 
+static BOOL alreadyValid(void) {
+    NSString *c = savedCode();
+    if (!c.length) return NO;
+    double ts = verifyCode(c);
+    if (ts > 0) { saveLicense(c, ts); return YES; }
+    return NO;
+}
+
+static UIWindow *gAppWindow = nil;
+
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+    if (gInHook) return;
+    if (gLockWindow) return;                 // 已经上锁，不重复
+    gAppWindow = (UIWindow *)self;
+
+    // 已保存的卡密仍然有效 → 直接放行
+    if (alreadyValid()) {
+        NSLog(@"[TodayHook] 本地卡密有效，直接进入");
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        checkLicense((UIWindow *)self);
+        if (gLockWindow) return;
+        gInHook = YES;
+        UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        w.windowLevel = UIWindowLevelAlert + 100;
+        w.backgroundColor = [UIColor blackColor];
+        w.rootViewController = [[LCLockVC alloc] init];
+        w.hidden = NO;
+        [w makeKeyAndVisible];
+        gLockWindow = w;
+        gInHook = NO;
+        NSLog(@"[TodayHook] 锁屏已显示");
     });
 }
 
@@ -181,5 +282,5 @@ __attribute__((constructor)) static void todayhook_init(void) {
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
     hookIfExists("XQGate", @selector(doBeat), (IMP)gate_noop);
-    NSLog(@"[TodayHook] loaded, window-hook=%d", orig_makeKeyAndVisible != NULL);
+    NSLog(@"[TodayHook] v3 loaded");
 }

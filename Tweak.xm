@@ -114,24 +114,16 @@ static NSString *fmtTime(double ts) {
 
     CGFloat w = self.view.bounds.size.width;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 34)];
-    title.center = CGPointMake(w / 2, self.view.bounds.size.height * 0.30);
-    title.text = @"安全模块加载中…";
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 40)];
+    title.center = CGPointMake(w / 2, self.view.bounds.size.height * 0.32);
+    title.text = @"Today-内部版";
     title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:22];
+    title.font = [UIFont boldSystemFontOfSize:28];
     title.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:title];
 
-    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 20)];
-    sub.center = CGPointMake(w / 2, title.center.y + 34);
-    sub.text = @"请输入卖家给你的卡密后继续";
-    sub.textColor = [UIColor colorWithWhite:0.65 alpha:1];
-    sub.font = [UIFont systemFontOfSize:14];
-    sub.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:sub];
-
     CGFloat fw = w - 80;
-    _field = [[UITextField alloc] initWithFrame:CGRectMake(40, sub.center.y + 40, fw, 46)];
+    _field = [[UITextField alloc] initWithFrame:CGRectMake(40, title.center.y + 56, fw, 46)];
     _field.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
     _field.layer.cornerRadius = 10;
     _field.layer.borderWidth = 1;

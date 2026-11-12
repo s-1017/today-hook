@@ -1,4 +1,4 @@
-name: Build Tweak
+name: Build Tweak (clang only, no theos)
 
 on:
   push:
@@ -7,28 +7,39 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Theos
+      - name: Install clang + lld
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang lld
+
+      - name: Download iOS SDK
         run: |
           set -e
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          mkdir -p "$HOME/theos/sdks"
           curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
           tar -xzf /tmp/sdks.tar.gz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" || true
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          ls /tmp/sdks-master | head -5
+          SDK=$(ls -d /tmp/sdks-master/iPhoneOS*.sdk | sort -V | tail -1)
+          echo "SDK=$SDK" >> $GITHUB_ENV
+          echo "选中 SDK: $SDK"
 
-      - name: Build
+      - name: Compile dylib
         run: |
-          export PATH="$HOME/theos/bin:$PATH"
-          make clean > build.log 2>&1 || true
-          make >> build.log 2>&1 || true
-          find .theos/obj -name '*.dylib' -not -path '*dSYM*' -exec ls -lh {} \; >> build.log 2>&1
-          tail -40 build.log
+          set -x
+          cp Tweak.xm Tweak.m
+          clang --version
+          clang -target arm64-apple-ios15.0.0 \
+                -isysroot "$SDK" \
+                -fobjc-arc -O2 -dynamiclib \
+                -framework Foundation -framework UIKit -framework CoreFoundation \
+                -Wl,-platform_version -Wl,ios -Wl,15.0 -Wl,15.0 \
+                -Wl,-undefined,dynamic_lookup \
+                -o XQAuthGateHook.dylib Tweak.m 2>&1 | tee build.log
+          ls -lh XQAuthGateHook.dylib || true
+          file XQAuthGateHook.dylib || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -36,5 +47,5 @@ jobs:
           name: out
           path: |
             build.log
-            .theos/obj/**/*.dylib
+            XQAuthGateHook.dylib
           if-no-files-found: warn

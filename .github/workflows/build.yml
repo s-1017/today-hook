@@ -10,16 +10,26 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Theos
+
+      - name: Setup Theos
         run: |
-          export THEOS=$HOME/theos
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          set -e
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          mkdir -p "$HOME/theos/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
+          tar -xzf /tmp/sdks.tar.gz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" || true
+          ls "$HOME/theos/sdks" | head
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
       - name: Build
         run: |
           make clean || true
           make
+          echo "---- dylib ----"
           find . -name "*.dylib" -exec ls -lh {} \;
+
       - uses: actions/upload-artifact@v4
         with:
           name: dylib

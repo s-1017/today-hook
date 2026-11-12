@@ -164,6 +164,12 @@ static void LCUnlock(void);
     [self.view addSubview:tip];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 自动聚焦输入框，键盘直接弹出
+    [_field becomeFirstResponder];
+}
+
 - (BOOL)textFieldShouldReturn:(UITextField *)tf {
     [tf resignFirstResponder];
     [self doVerify];
@@ -224,12 +230,7 @@ static void LCGuardTick(void) {
     if (!gLockVC || !gLockVC.view.window) {
         LCShowLock();
     }
-    // 未验证时禁止操作底层窗口（但不能禁用承载验证界面的那个窗口）
-    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        BOOL containsLock = (gLockVC && gLockVC.view && [gLockVC.view isDescendantOfView:win]);
-        if (!containsLock) win.userInteractionEnabled = NO;
-        else win.userInteractionEnabled = YES;      // 承载锁屏的窗口必须可交互
-    }
+    // 全屏模态本身就已挡住底层，不再禁用任何窗口（否则会连键盘一起禁掉）
 }
 
 static void LCStartGuard(void) {

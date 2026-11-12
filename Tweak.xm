@@ -1,7 +1,7 @@
-// Tweak.xm —— Today 自有授权层 v4
-//   · 全屏锁定 + 看门狗（锁屏被 App 关掉会自动重新盖回）
-//   · 未验证时禁用底层窗口触摸
+// Tweak.xm —— Today 自有授权层 v5（UI 仿 Zalo 卡密激活页）
+//   · 全屏模态锁定 + 看门狗（被关掉自动重建）
 //   · 卡密本地保存、下次自动填入
+//   · 底部「清除已保存的卡密」可点
 //   · 到期时间显示到年月日时分秒
 
 #import <Foundation/Foundation.h>
@@ -14,13 +14,18 @@ static NSString *const kStoreKey = @"_today_lic_v1";
 static const int kEpochDay = 18262;
 static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-static UIWindow *gLockWindow = nil;
 static UIWindow *gAppWindow = nil;
 static NSTimer *gGuard = nil;
 static BOOL gInHook = NO;
 static BOOL gUnlocked = NO;
 @class LCLockVC;
 static LCLockVC *gLockVC = nil;
+
+#define LC_BLUE [UIColor colorWithRed:0.18 green:0.48 blue:0.96 alpha:1.0]
+#define LC_BG   [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0]
+#define LC_CARD [UIColor colorWithRed:0.055 green:0.067 blue:0.090 alpha:1.0]
+#define LC_BORD [UIColor colorWithRed:0.129 green:0.161 blue:0.212 alpha:1.0]
+#define LC_FIELD [UIColor colorWithRed:0.051 green:0.067 blue:0.090 alpha:1.0]
 
 #pragma mark - Base32 / HMAC
 
@@ -85,13 +90,19 @@ static NSString *savedCode(void) {
     return [c isKindOfClass:[NSString class]] ? c : nil;
 }
 
+static void clearLicense(void) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u removeObjectForKey:kStoreKey];
+    [u synchronize];
+}
+
 static NSString *fmtTime(double ts) {
     NSDateFormatter *f = [[NSDateFormatter alloc] init];
     f.dateFormat = @"yyyy-MM-dd HH:mm:ss";
     return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
 }
 
-#pragma mark - 锁定界面
+#pragma mark - 卡密激活界面
 
 static void LCUnlock(void);
 
@@ -99,75 +110,115 @@ static void LCUnlock(void);
 @property (nonatomic, strong) UITextField *field;
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UIButton *btn;
+@property (nonatomic, strong) UIView *card;
 @end
 
 @implementation LCLockVC
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1.0];
+    self.view.backgroundColor = LC_BG;
 
-    CGFloat w = self.view.bounds.size.width;
-    CGFloat h = self.view.bounds.size.height;
+    CGFloat w  = self.view.bounds.size.width;
+    CGFloat h  = self.view.bounds.size.height;
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w - 60, 40)];
-    title.center = CGPointMake(w / 2, h * 0.32);
-    title.text = @"Today-内部版";
+    // 图标
+    CGFloat iconS = 82;
+    UIView *icon = [[UIView alloc] initWithFrame:CGRectMake((w - iconS) / 2, h * 0.085, iconS, iconS)];
+    icon.backgroundColor = LC_BLUE;
+    icon.layer.cornerRadius = 19;
+    icon.layer.shadowColor = LC_BLUE.CGColor;
+    icon.layer.shadowOpacity = 0.55;
+    icon.layer.shadowRadius = 18;
+    icon.layer.shadowOffset = CGSizeZero;
+    [self.view addSubview:icon];
+
+    UILabel *ic = [[UILabel alloc] initWithFrame:icon.bounds];
+    ic.text = @"T";
+    ic.textColor = [UIColor whiteColor];
+    ic.font = [UIFont boldSystemFontOfSize:46];
+    ic.textAlignment = NSTextAlignmentCenter;
+    [icon addSubview:ic];
+
+    // 标题
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, icon.frame.origin.y + iconS + 16, w, 42)];
+    title.text = @"Today内部版";
     title.textColor = [UIColor whiteColor];
-    title.font = [UIFont boldSystemFontOfSize:28];
+    title.font = [UIFont boldSystemFontOfSize:32];
     title.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:title];
 
-    CGFloat fw = w - 80;
-    _field = [[UITextField alloc] initWithFrame:CGRectMake(40, title.center.y + 56, fw, 46)];
-    _field.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
+    // 卡片
+    CGFloat cardW = w - 56;
+    CGFloat cardH = 208;
+    CGFloat cardY = h * 0.455;
+    _card = [[UIView alloc] initWithFrame:CGRectMake(28, cardY, cardW, cardH)];
+    _card.backgroundColor = LC_CARD;
+    _card.layer.cornerRadius = 16;
+    _card.layer.borderWidth = 1;
+    _card.layer.borderColor = LC_BORD.CGColor;
+    [self.view addSubview:_card];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 16, cardW - 36, 18)];
+    lab.text = @"卡密激活";
+    lab.textColor = LC_BLUE;
+    lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    [_card addSubview:lab];
+
+    _field = [[UITextField alloc] initWithFrame:CGRectMake(10, 40, cardW - 20, 54)];
+    _field.backgroundColor = LC_FIELD;
     _field.layer.cornerRadius = 10;
     _field.layer.borderWidth = 1;
-    _field.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1].CGColor;
+    _field.layer.borderColor = LC_BORD.CGColor;
     _field.textColor = [UIColor whiteColor];
-    _field.tintColor = [UIColor whiteColor];
-    _field.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
-    _field.textAlignment = NSTextAlignmentCenter;
-    _field.placeholder = @"TODAY-XXXX-XXXX-XXXX";
+    _field.tintColor = LC_BLUE;
+    _field.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
+    _field.placeholder = @"请输入卡密";
     _field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
     _field.autocorrectionType = UITextAutocorrectionTypeNo;
     _field.returnKeyType = UIReturnKeyDone;
     _field.delegate = self;
-    [self.view addSubview:_field];
+    _field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 14, 1)];
+    _field.leftViewMode = UITextFieldViewModeAlways;
+    [_card addSubview:_field];
 
     NSString *saved = savedCode();
     if (saved.length) _field.text = saved;
 
     _btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    _btn.frame = CGRectMake(40, _field.frame.origin.y + 62, fw, 48);
-    _btn.backgroundColor = [UIColor colorWithRed:0.20 green:0.53 blue:0.98 alpha:1];
-    _btn.layer.cornerRadius = 10;
-    [_btn setTitle:@"验 证" forState:UIControlStateNormal];
+    _btn.frame = CGRectMake(10, 108, cardW - 20, 54);
+    _btn.backgroundColor = LC_BLUE;
+    _btn.layer.cornerRadius = 12;
+    [_btn setTitle:@"验 证 激 活" forState:UIControlStateNormal];
     [_btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     _btn.titleLabel.font = [UIFont boldSystemFontOfSize:17];
     [_btn addTarget:self action:@selector(doVerify) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_btn];
+    [_card addSubview:_btn];
 
-    _status = [[UILabel alloc] initWithFrame:CGRectMake(24, _btn.frame.origin.y + 66, w - 48, 48)];
-    _status.numberOfLines = 0;
-    _status.textColor = [UIColor colorWithWhite:0.6 alpha:1];
-    _status.font = [UIFont systemFontOfSize:13];
+    _status = [[UILabel alloc] initWithFrame:CGRectMake(16, 172, cardW - 32, 22)];
+    _status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    _status.font = [UIFont systemFontOfSize:12];
     _status.textAlignment = NSTextAlignmentCenter;
-    _status.text = saved.length ? @"已读取上次的卡密，点击「验证」进入" : @"";
-    [self.view addSubview:_status];
+    _status.text = saved.length ? @"已加载卡密，请登录" : @"";
+    [_card addSubview:_status];
 
-    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(0, h - 60, w, 20)];
-    tip.text = @"授权有效期以卡密为准";
-    tip.textColor = [UIColor colorWithWhite:0.35 alpha:1];
-    tip.font = [UIFont systemFontOfSize:11];
-    tip.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:tip];
+    // 底部：清除已保存的卡密
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    clear.frame = CGRectMake(0, h - 92, w, 40);
+    [clear setTitle:@"清除已保存的卡密" forState:UIControlStateNormal];
+    [clear setTitleColor:[UIColor colorWithWhite:0.40 alpha:1] forState:UIControlStateNormal];
+    clear.titleLabel.font = [UIFont systemFontOfSize:12];
+    [clear addTarget:self action:@selector(doClear) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:clear];
 }
 
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    // 自动聚焦输入框，键盘直接弹出
-    [_field becomeFirstResponder];
+- (void)doClear {
+    clearLicense();
+    _field.text = @"";
+    _status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    _status.text = @"已清除本地卡密";
+    NSLog(@"[TodayHook] 已清除本地卡密");
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)tf {
@@ -184,10 +235,11 @@ static void LCUnlock(void);
     if (ts > 0) {
         saveLicense(code, ts);
         _status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
-        _status.text = [NSString stringWithFormat:@"验证通过\n有效期至 %@", fmtTime(ts)];
+        _status.text = [NSString stringWithFormat:@"验证通过 · 有效期至 %@", fmtTime(ts)];
         _btn.enabled = NO;
+        [_btn setTitle:@"验 证 中…" forState:UIControlStateNormal];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [self unlock]; });
+                       dispatch_get_main_queue(), ^{ LCUnlock(); });
     } else {
         _status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
         _status.text = (ts == -2) ? @"该卡密已过期，请联系卖家续费"
@@ -195,13 +247,9 @@ static void LCUnlock(void);
     }
 }
 
-- (void)unlock {
-    LCUnlock();
-}
-
 @end
 
-#pragma mark - 看门狗 / 锁定控制
+#pragma mark - 锁定控制
 
 static void LCShowLock(void);
 
@@ -213,9 +261,6 @@ static void LCUnlock(void) {
     LCLockVC *vc = gLockVC;
     gLockVC = nil;
     if (vc) [vc dismissViewControllerAnimated:NO completion:nil];
-    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        win.userInteractionEnabled = YES;
-    }
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
     NSLog(@"[TodayHook] 已解锁");
@@ -226,11 +271,7 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    // 锁屏被关掉 / 被移除 → 立刻重新呈现
-    if (!gLockVC || !gLockVC.view.window) {
-        LCShowLock();
-    }
-    // 全屏模态本身就已挡住底层，不再禁用任何窗口（否则会连键盘一起禁掉）
+    if (!gLockVC || !gLockVC.view.window) LCShowLock();
 }
 
 static void LCStartGuard(void) {
@@ -242,9 +283,8 @@ static void LCStartGuard(void) {
 
 static void LCShowLock(void) {
     if (gUnlocked) return;
-    if (gLockVC && gLockVC.view.window) return;      // 已经在显示
+    if (gLockVC && gLockVC.view.window) return;
 
-    // 找 App 自己的根视图控制器（跟着 UIWindowScene 走，不会被场景踢掉）
     UIViewController *host = gAppWindow.rootViewController;
     if (!host) {
         for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
@@ -260,13 +300,11 @@ static void LCShowLock(void) {
     gInHook = YES;
     LCLockVC *vc = [[LCLockVC alloc] init];
     vc.modalPresentationStyle = UIModalPresentationFullScreen;
-    vc.modalTransitionStyle = UIModalTransitionStyleCoverVertical;
-    vc.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.05 blue:0.07 alpha:1.0];
     gLockVC = vc;
     [host presentViewController:vc animated:NO completion:nil];
     gInHook = NO;
     LCStartGuard();
-    NSLog(@"[TodayHook] 锁屏已呈现 (host=%@)", NSStringFromClass([host class]));
+    NSLog(@"[TodayHook] 激活页已呈现");
 }
 
 #pragma mark - Hook
@@ -277,13 +315,12 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
     if (gInHook) return;
-    if (gLockWindow) return;
-    if (self == gLockWindow) return;
+    if (gLockVC) return;
     gAppWindow = (UIWindow *)self;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (gUnlocked || gLockWindow) return;
+        if (gUnlocked || gLockVC) return;
         LCShowLock();
     });
 }
@@ -308,5 +345,5 @@ __attribute__((constructor)) static void todayhook_init(void) {
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
     hookIfExists("XQGate", @selector(doBeat), (IMP)gate_noop);
-    NSLog(@"[TodayHook] v4 loaded");
+    NSLog(@"[TodayHook] v5 loaded");
 }

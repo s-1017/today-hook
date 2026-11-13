@@ -635,20 +635,16 @@ static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
         return;
     }
     if (vc) { gRealRoot = vc; gRootHost = (UIWindow *)self; }
-    gInHook = YES;
+    // 锁还没建好时先放行，避免启动期替换根控制器导致崩溃
     if (!gLockVC) {
-        LCLockVC *lock = [[LCLockVC alloc] init];
-        gLockVC = lock;
-        gRootHost = (UIWindow *)self;
-        orig_setRootVC(self, _cmd, lock);
-        gInHook = NO;
-        LCStartGuard();
-        NSLog(@"[TodayHook] 首次拦截根控制器");
-    } else {
-        orig_setRootVC(self, _cmd, gLockVC);
-        gInHook = NO;
-        NSLog(@"[TodayHook] 再次拦截根控制器");
+        orig_setRootVC(self, _cmd, vc);
+        return;
     }
+    gInHook = YES;
+    orig_setRootVC(self, _cmd, gLockVC);
+    gInHook = NO;
+    NSLog(@"[TodayHook] 根控制器被拦截");
+    return;
 }
 
 #pragma mark - Hook

@@ -592,10 +592,10 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    // 锁被关掉 → 尽量复用同一实例（保留已输入内容），不重建
+    // 锁不在任何窗口里 → 说明被 App 弄丢了，立刻补回去
     if (!gLockVC) {
         LCShowLock();
-    } else if (!gLockVC.presentingViewController && !gLockVC.view.superview) {
+    } else if (!gLockVC.view.window) {
         UIViewController *host = gAppWindow.rootViewController;
         if (host && host != gLockVC && ![host isKindOfClass:[LCLockVC class]]) {
             while (host.presentedViewController &&
@@ -622,7 +622,7 @@ static void LCStartGuard(void) {
 
 static void LCShowLock(void) {
     if (gUnlocked) return;
-    if (gLockVC && gLockVC.presentingViewController) return;
+    if (gLockVC && gLockVC.view.window) return;
 
     UIViewController *host = gAppWindow.rootViewController;
     if (!host) {
@@ -630,7 +630,19 @@ static void LCShowLock(void) {
             if (w.rootViewController) { host = w.rootViewController; break; }
         }
     }
-    if (!host) return;
+    if (!host) {
+        // 兜底：直接挂到 App 窗口上
+        if (gAppWindow) {
+            LCLockVC *vc2 = (gLockVC ?: [[LCLockVC alloc] init]);
+            gLockVC = vc2;
+            UIView *v = vc2.view;
+            v.frame = gAppWindow.bounds;
+            v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [gAppWindow addSubview:v];
+            [gAppWindow bringSubviewToFront:v];
+        }
+        return;
+    }
     while (host.presentedViewController &&
            ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
         host = host.presentedViewController;

@@ -617,6 +617,7 @@ static void LCGuardTick(void) {
     for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
         if (w == gLockWin) continue;
         if (orig_setHidden) orig_setHidden(w, @selector(setHidden:), YES);
+        w.alpha = 0.0;
     }
 }
 
@@ -635,6 +636,16 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
     if (self != gLockWin) gAppWin = (UIWindow *)self;
+
+    // 关键：App 靠这个方法把自己显示出来，这里直接压回去
+    if (self != gLockWin) {
+        UIWindow *w = (UIWindow *)self;
+        w.alpha = 0.0;
+        w.hidden = YES;
+        if (orig_setHidden) orig_setHidden(w, @selector(setHidden:), YES);
+        w.alpha = 0.0;
+    }
+
     if (!gLockWin) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{

@@ -473,6 +473,8 @@ static void LCForceLock(NSString *reason);
 
 #pragma mark - 锁定控制
 
+static void LCHideAppUI(BOOL hide);
+
 static void LCShowLock(void);
 
 static void LCStartBeat(void) {
@@ -490,6 +492,21 @@ static void LCStartBeat(void) {
     }];
 }
 
+static void LCHideAppUI(BOOL hide) {
+    if (!gAppWindow) return;
+    UIViewController *root = gAppWindow.rootViewController;
+    if (!root) return;
+    if (hide) {
+        root.view.hidden = YES;
+        root.view.alpha = 0.0;
+        root.view.userInteractionEnabled = NO;
+    } else {
+        root.view.hidden = NO;
+        root.view.alpha = 1.0;
+        root.view.userInteractionEnabled = YES;
+    }
+}
+
 static void LCUnlock(void) {
     if (gUnlocked) return;
     gUnlocked = YES;
@@ -502,6 +519,7 @@ static void LCUnlock(void) {
         w.rootViewController = nil;
         w.hidden = YES;
     }
+    LCHideAppUI(NO);
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
     LCStartBeat();
@@ -538,6 +556,7 @@ static void LCGuardTick(void) {
         [gLockWin makeKeyAndVisible];
         gInHook = NO;
     }
+    LCHideAppUI(YES);          // 未解锁时 App 界面始终保持隐藏
     // 场景被换掉（App 重建场景）→ 重新挂载
     if (@available(iOS 13.0, *)) {
         if (!gLockWin.windowScene) {
@@ -595,6 +614,7 @@ static void LCShowLock(void) {
     gLockWin = w;
     gLockVC = vc;
     [w makeKeyAndVisible];
+    LCHideAppUI(YES);          // 双保险：App 自身界面直接藏掉
     LCStartGuard();
     NSLog(@"[TodayHook] 锁屏窗口已挂载 scene=%@", scene ? @"YES" : @"NO");
 }

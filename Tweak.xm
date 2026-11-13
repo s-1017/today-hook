@@ -584,6 +584,9 @@ static UIWindow *gHostWindow = nil;
 
 static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
 
+static void LCStartGuard(void);
+static void LCGuardTick(void);
+
 static void LCInstallLock(void) {
     if (gUnlocked || !gHostWindow) return;
     if (gLockVC) return;

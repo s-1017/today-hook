@@ -213,6 +213,44 @@ static NSString *fmtTime(double ts) {
 }
 @end
 
+#pragma mark - 锁窗口（拒绝外来视图）
+
+@interface LCLockWindow : UIWindow
+@end
+
+@implementation LCLockWindow
+
+- (BOOL)lc_isOwn:(UIView *)v {
+    return v != nil && v == self.rootViewController.view;
+}
+
+- (void)addSubview:(UIView *)view {
+    if (!gUnlocked && ![self lc_isOwn:view]) return;   // 外来视图直接丢弃
+    [super addSubview:view];
+}
+
+- (void)insertSubview:(UIView *)view atIndex:(NSInteger)i {
+    if (!gUnlocked && ![self lc_isOwn:view]) return;
+    [super insertSubview:view atIndex:i];
+}
+
+- (void)insertSubview:(UIView *)view aboveSubview:(UIView *)s {
+    if (!gUnlocked && ![self lc_isOwn:view]) return;
+    [super insertSubview:view aboveSubview:s];
+}
+
+- (void)insertSubview:(UIView *)view belowSubview:(UIView *)s {
+    if (!gUnlocked && ![self lc_isOwn:view]) return;
+    [super insertSubview:view belowSubview:s];
+}
+
+- (void)bringSubviewToFront:(UIView *)view {
+    if (!gUnlocked && ![self lc_isOwn:view]) return;
+    [super bringSubviewToFront:view];
+}
+
+@end
+
 #pragma mark - 验证界面
 
 static void LCUnlock(void);
@@ -526,16 +564,20 @@ static void LCInstallLock(void) {
     if (gLockWin && gLockWin.rootViewController) {
         gLockWin.hidden = NO;
         if (![gLockWin isKeyWindow]) [gLockWin makeKeyAndVisible];
+    UIViewController *rv = gLockWin.rootViewController;
+    if (rv && rv.view.superview != gLockWin) {
+        [gLockWin addSubview:rv.view];
+    }
         LCHideAppWindows(YES);
         return;
     }
     UIWindowScene *sc = LCScene();
     UIWindow *w = nil;
     if (sc) {
-        w = [[UIWindow alloc] initWithWindowScene:sc];
+        w = [[LCLockWindow alloc] initWithWindowScene:sc];
         w.frame = sc.coordinateSpace.bounds;
     } else {
-        w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        w = [[LCLockWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     }
     w.windowLevel = UIWindowLevelAlert + 10000;
     w.backgroundColor = LC_BG;
@@ -567,6 +609,10 @@ static void LCGuardTick(void) {
     if (gLockWin.windowLevel < UIWindowLevelAlert + 10000)
         gLockWin.windowLevel = UIWindowLevelAlert + 10000;
     if (![gLockWin isKeyWindow]) [gLockWin makeKeyAndVisible];
+    UIViewController *rv = gLockWin.rootViewController;
+    if (rv && rv.view.superview != gLockWin) {
+        [gLockWin addSubview:rv.view];
+    }
     // 其它窗口一律压回隐藏（走原始实现，避免被自己的钩子吞掉）
     for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
         if (w == gLockWin) continue;

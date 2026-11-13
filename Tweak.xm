@@ -249,6 +249,12 @@ static void LCForceLock(NSString *reason);
 
 @implementation LCLockVC
 
+- (void)loadView {
+    UIView *v = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    v.backgroundColor = [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0];
+    self.view = v;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = LC_BG;
@@ -512,15 +518,12 @@ static void LCUnlock(void) {
     gUnlocked = YES;
     if (gGuard) { [gGuard invalidate]; gGuard = nil; }
     gInHook = YES;
-    UIWindow *w = gLockWin;
-    gLockWin = nil;
+    LCLockVC *vc = gLockVC;
     gLockVC = nil;
-    if (w) {
-        w.rootViewController = nil;
-        w.hidden = YES;
-    }
+    if (vc) [vc.view removeFromSuperview];
     LCHideAppUI(NO);
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) win.hidden = NO;
     gInHook = NO;
     LCStartBeat();
     NSLog(@"[TodayHook] 已解锁");
@@ -544,43 +547,25 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    if (!gLockWin || !gLockWin.rootViewController) {
+    if (!gLockVC || !gLockVC.view.superview) {
         LCShowLock();
         return;
     }
-    if (gLockWin.hidden) gLockWin.hidden = NO;
-    if (gLockWin.windowLevel < UIWindowLevelAlert + 10000)
-        gLockWin.windowLevel = UIWindowLevelAlert + 10000;
-    if (![gLockWin isKeyWindow]) {
-        gInHook = YES;
-        [gLockWin makeKeyAndVisible];
-        gInHook = NO;
+    UIWindow *host = gLockWin ?: gAppWindow;
+    if (host) {
+        if (host.hidden) host.hidden = NO;
+        if (gLockVC.view.superview != host) [host addSubview:gLockVC.view];
+        [host bringSubviewToFront:gLockVC.view];
+        UIViewController *root = host.rootViewController;
+        if (root && root.view != gLockVC.view && !root.view.hidden) {
+            root.view.hidden = YES;
+            root.view.alpha = 0.0;
+        }
     }
-    LCHideAppUI(YES);          // 未解锁时 App 界面始终保持隐藏
-
-    // 关键：把所有非锁屏窗口直接隐藏（App 换新窗口也压得住）
+    // 其它窗口一律隐藏
     for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        if (win == gLockWin) continue;
+        if (win == host) continue;
         if (!win.hidden) win.hidden = YES;
-        if (![win isKindOfClass:[UIWindow class]]) continue;
-        UIViewController *rvc = win.rootViewController;
-        if (rvc && !rvc.view.hidden) {
-            rvc.view.hidden = YES;
-            rvc.view.alpha = 0.0;
-            rvc.view.userInteractionEnabled = NO;
-        }
-    }
-
-    // 场景被换掉（App 重建场景）→ 重新挂载
-    if (@available(iOS 13.0, *)) {
-        if (!gLockWin.windowScene) {
-            UIWindow *old = gLockWin;
-            gLockWin = nil;
-            gLockVC = nil;
-            old.hidden = YES;
-            old.rootViewController = nil;
-            LCShowLock();
-        }
     }
 }
 
@@ -593,44 +578,37 @@ static void LCStartGuard(void) {
 
 static void LCShowLock(void) {
     if (gUnlocked) return;
-    if (gLockWin && gLockWin.rootViewController) {
-        gLockWin.hidden = NO;
-        if (![gLockWin isKeyWindow]) [gLockWin makeKeyAndVisible];
-        return;
-    }
+    if (gLockVC && gLockVC.view.superview) return;
 
-    UIWindowScene *scene = nil;
-    if (@available(iOS 13.0, *)) {
-        if (gAppWindow.windowScene) scene = gAppWindow.windowScene;
-        if (!scene) {
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]] &&
-                    sc.activationState == UISceneActivationStateForegroundActive) {
-                    scene = (UIWindowScene *)sc;
-                    break;
-                }
-            }
+    UIWindow *host = gAppWindow;
+    if (!host) {
+        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+            if (w.rootViewController) { host = w; break; }
         }
     }
+    if (!host) return;
+    gAppWindow = host;
 
+    gInHook = YES;
+    host.hidden = NO;
     LCLockVC *vc = [[LCLockVC alloc] init];
-    UIWindow *w = nil;
-    if (scene) {
-        w = [[UIWindow alloc] initWithWindowScene:scene];
-        w.frame = scene.coordinateSpace.bounds;
-    } else {
-        w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    }
-    w.windowLevel = UIWindowLevelAlert + 10000;
-    w.backgroundColor = [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0];
-    w.rootViewController = vc;
-    w.hidden = NO;
-    gLockWin = w;
+    UIView *v = vc.view;                       // 触发 loadView，frame=全屏
+    v.frame = host.bounds;
+    v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [host addSubview:v];
+    [host bringSubviewToFront:v];
     gLockVC = vc;
-    [w makeKeyAndVisible];
-    LCHideAppUI(YES);          // 双保险：App 自身界面直接藏掉
+    gLockWin = host;                           // 复用 App 窗口作为"锁宿主"
+    // 把 App 自己的内容藏掉，只留我们的验证界面
+    UIViewController *root = host.rootViewController;
+    if (root && root.view != v) {
+        root.view.hidden = YES;
+        root.view.alpha = 0.0;
+        root.view.userInteractionEnabled = NO;
+    }
+    gInHook = NO;
     LCStartGuard();
-    NSLog(@"[TodayHook] 锁屏窗口已挂载 scene=%@", scene ? @"YES" : @"NO");
+    NSLog(@"[TodayHook] 验证界面已作为子视图挂载");
 }
 
 #pragma mark - Hook
@@ -658,7 +636,7 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
 static void (*orig_setHidden)(id, SEL, BOOL) = NULL;
 
 static void my_setHidden(id self, SEL _cmd, BOOL h) {
-    if (!gUnlocked && !gInHook && h == NO && self != gLockWin) {
+    if (!gUnlocked && !gInHook && h == NO && self != gLockWin && self != gAppWindow) {
         if (orig_setHidden) orig_setHidden(self, _cmd, YES);
         return;
     }

@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonHMAC.h>
 #import <objc/runtime.h>
+#import <Security/Security.h>
 
 static NSString *const kSecret = @"TODAY-HMAC-2026-ChAnGeMe-9f3a7c";
 static NSString *const kStoreKey = @"_today_lic_v1";
@@ -108,7 +109,37 @@ static void clearLicense(void) {
     [u synchronize];
 }
 
+// ---- Keychain 读写（重装 App 不丢设备 ID）----
+static NSString *kcGet(void) {
+    NSDictionary *q = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                        (__bridge id)kSecAttrService: @"com.today.internal.lic",
+                        (__bridge id)kSecAttrAccount: @"devid",
+                        (__bridge id)kSecReturnData: @YES,
+                        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne};
+    CFTypeRef r = NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &r) == errSecSuccess && r) {
+        NSData *d = (__bridge_transfer NSData *)r;
+        NSString *v = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if ([v isKindOfClass:[NSString class]] && v.length >= 6) return v;
+    }
+    return nil;
+}
+
+static BOOL kcSet(NSString *v) {
+    NSDictionary *base = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                           (__bridge id)kSecAttrService: @"com.today.internal.lic",
+                           (__bridge id)kSecAttrAccount: @"devid"};
+    SecItemDelete((__bridge CFDictionaryRef)base);
+    NSMutableDictionary *add = [base mutableCopy];
+    add[(__bridge id)kSecValueData] = [v dataUsingEncoding:NSUTF8StringEncoding];
+    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+    return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
+}
+
 static NSString *deviceId(void) {
+    NSString *v = kcGet();
+    if (v.length) return v;
+
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     NSString *d = [u objectForKey:kDevKey];
     if (![d isKindOfClass:[NSString class]] || d.length < 6) {
@@ -116,6 +147,7 @@ static NSString *deviceId(void) {
         [u setObject:d forKey:kDevKey];
         [u synchronize];
     }
+    if (!kcSet(d)) NSLog(@"[TodayHook] Keychain 写入失败，设备ID 仅存本地");
     return d;
 }
 

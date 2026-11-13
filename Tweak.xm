@@ -379,10 +379,13 @@ static void LCForceLock(NSString *reason);
                 return;
             }
             if (ok) {
-                clearLicense();
-                self.field.text = @"";
+                BOOL nothing = [msg rangeOfString:@"无需解绑"].location != NSNotFound;
+                if (!nothing) {
+                    clearLicense();
+                    self.field.text = @"";
+                }
                 self.status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
-                self.status.text = @"已解绑（扣除 6 小时），请重新激活";
+                self.status.text = msg.length ? msg : @"已解绑，请重新激活";
             } else {
                 self.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
                 self.status.text = msg.length ? msg : @"解绑失败";

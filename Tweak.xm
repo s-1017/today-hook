@@ -695,6 +695,7 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
 #pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
+static int gShowAttempts = 0;
 
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
@@ -702,9 +703,16 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
     gAppWindow = (UIWindow *)self;
     if (gLockVC) {
         LCHideAppUI(YES);
-        // App 想显示自己 → 立刻压回不可见（7 秒闪烁的根因）
         ((UIWindow *)self).alpha = 0.0;
         ((UIWindow *)self).hidden = YES;
+        // 进程级门禁：未激活却反复想显示自己的界面 → 直接退出，绝不让 HUD 出现
+        gShowAttempts++;
+        NSLog(@"[TodayHook] App 试图显示界面（第 %d 次），仍未激活", gShowAttempts);
+        if (gShowAttempts >= 2 && !gUnlocked) {
+            NSLog(@"[TodayHook] 未激活，退出进程");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ if (!gUnlocked) exit(0); });
+        }
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),

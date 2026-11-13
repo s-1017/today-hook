@@ -64,7 +64,8 @@ static NSData *hmac5(NSData *msg) {
     return [NSData dataWithBytes:mac length:5];
 }
 
-static double verifyCodeLocal(NSString *raw) {
+// 返回天数（>0 有效）；-1 格式/签名错误
+static NSInteger verifyCodeDays(NSString *raw) {
     if (!raw.length) return -1;
     NSString *s = [[raw stringByTrimmingCharactersInSet:
                     [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
@@ -75,17 +76,21 @@ static double verifyCodeLocal(NSString *raw) {
     NSData *mac = [bin subdataWithRange:NSMakeRange(4, 5)];
     if (![mac isEqualToData:hmac5(body)]) return -1;
     const uint8_t *b = (const uint8_t *)body.bytes;
-    NSInteger day = ((NSInteger)b[0] << 8) | b[1];
-    double expireTs = (double)(day + kEpochDay) * 86400.0 + 86399.0;
-    if (expireTs < [[NSDate date] timeIntervalSince1970]) return -2;
-    return expireTs;
+    NSInteger days = ((NSInteger)b[0] << 8) | b[1];
+    return days > 0 ? days : -1;
 }
 
 #pragma mark - 本地存储
 
+static void saveLicenseEx(NSString *code, double expireTs, double activatedTs);
+
 static void saveLicense(NSString *code, double expireTs) {
+    saveLicenseEx(code, expireTs, [[NSDate date] timeIntervalSince1970]);
+}
+
+static void saveLicenseEx(NSString *code, double expireTs, double activatedTs) {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
-    [u setObject:@{@"c": code ?: @"", @"e": @(expireTs),
+    [u setObject:@{@"c": code ?: @"", @"e": @(expireTs), @"a": @(activatedTs),
                    @"t": @([[NSDate date] timeIntervalSince1970])} forKey:kStoreKey];
     [u synchronize];
 }
@@ -321,17 +326,21 @@ static void LCForceLock(NSString *reason);
             self->_status.text = msg.length ? msg : @"验证失败";
             return;
         }
-        // 网络不可达 → 离线兜底
-        double local = verifyCodeLocal(code);
-        if (local > 0) {
-            saveLicense(code, local);
+        // 网络不可达 → 离线兜底（同样是"首次激活起算"）
+        NSInteger days = verifyCodeDays(code);
+        if (days > 0) {
+            double act = [[NSDate date] timeIntervalSince1970];
+            NSDictionary *old = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+            if ([old isKindOfClass:[NSDictionary class]] &&
+                [old[@"c"] isEqualToString:code] && [old[@"a"] doubleValue] > 0) {
+                act = [old[@"a"] doubleValue];      // 同一张卡沿用首次激活时间
+            }
+            double exp = act + days * 86400.0;
+            saveLicenseEx(code, exp, act);
             self->_status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
-            self->_status.text = [NSString stringWithFormat:@"离线验证通过 · 有效期至 %@", fmtTime(local)];
+            self->_status.text = [NSString stringWithFormat:@"离线验证通过 · 有效期至 %@", fmtTime(exp)];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ LCUnlock(); });
-        } else if (local == -2) {
-            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
-            self->_status.text = @"该卡密已过期，请联系卖家续费";
         } else {
             self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
             self->_status.text = @"网络不可用，且卡密格式无效";

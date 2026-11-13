@@ -304,6 +304,19 @@ static void LCForceLock(NSString *reason);
     _status.text = saved.length ? @"已加载卡密，请登录" : @"";
     [_card addSubview:_status];
 
+    // 左下角：自助解绑
+    UIButton *unbind = [UIButton buttonWithType:UIButtonTypeSystem];
+    unbind.frame = CGRectMake(18, h - 118, 120, 34);
+    [unbind setTitle:@"解 绑 设 备" forState:UIControlStateNormal];
+    [unbind setTitleColor:[UIColor colorWithRed:0.95 green:0.62 blue:0.24 alpha:1]
+                 forState:UIControlStateNormal];
+    unbind.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    unbind.layer.borderWidth = 1;
+    unbind.layer.borderColor = [UIColor colorWithRed:0.42 green:0.28 blue:0.10 alpha:1].CGColor;
+    unbind.layer.cornerRadius = 17;
+    [unbind addTarget:self action:@selector(doUnbind) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:unbind];
+
     UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
     clear.frame = CGRectMake(0, h - 92, w, 40);
     [clear setTitle:@"清除已保存的卡密" forState:UIControlStateNormal];
@@ -311,6 +324,46 @@ static void LCForceLock(NSString *reason);
     clear.titleLabel.font = [UIFont systemFontOfSize:12];
     [clear addTarget:self action:@selector(doClear) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:clear];
+}
+
+- (void)doUnbind {
+    NSString *code = [[_field.text stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
+    if (code.length < 8) {
+        code = savedCode() ?: @"";
+    }
+    if (!code.length) {
+        _status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        _status.text = @"请先输入卡密再解绑";
+        return;
+    }
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"解绑设备"
+                          message:@"解绑后本设备将失去授权，且扣除 6 小时时长。\n确定解绑？"
+                   preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"确定解绑" style:UIAlertActionStyleDestructive
+                                       handler:^(UIAlertAction *a) {
+        self.status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        self.status.text = @"正在解绑…";
+        [LCNet request:@"unbind" code:code done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
+            if (!reachable) {
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+                self.status.text = @"网络不可用，解绑失败";
+                return;
+            }
+            if (ok) {
+                clearLicense();
+                self.field.text = @"";
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
+                self.status.text = @"已解绑（扣除 6 小时），请重新激活";
+            } else {
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+                self.status.text = msg.length ? msg : @"解绑失败";
+            }
+        }];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)doClear {

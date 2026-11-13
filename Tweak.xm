@@ -697,12 +697,53 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
 static int gShowAttempts = 0;
 
+static void (*orig_setHidden)(id, SEL, BOOL) = NULL;
+
+// HUD 相关窗口/控制器一律不许显示
+static BOOL LCIsHudObject(id o) {
+    NSString *n = NSStringFromClass([o class]);
+    if ([n containsString:@"HUD"]) return YES;
+    if ([n containsString:@"ImGui"]) return YES;
+    if ([n containsString:@"MTKView"]) return YES;
+    if ([n containsString:@"Metal"]) return YES;
+    return NO;
+}
+
+// 允许显示的：我们的锁 / 键盘 / 状态栏 / 系统弹窗
+static BOOL LCAllowedWindow(id w) {
+    if (w == gLockWin) return YES;
+    if (w == gAppWin) return YES;
+    NSString *n = NSStringFromClass([w class]);
+    if ([n containsString:@"Keyboard"]) return YES;
+    if ([n containsString:@"TextEffects"]) return YES;
+    if ([n containsString:@"StatusBar"]) return YES;
+    if ([n containsString:@"Alert"]) return YES;
+    return NO;
+}
+
+static void my_setHidden(id self, SEL _cmd, BOOL h) {
+    if (!gUnlocked && h == NO) {
+        if (!LCAllowedWindow(self) || LCIsHudObject(self)) {
+            if (orig_setHidden) orig_setHidden(self, _cmd, YES);
+            NSLog(@"[TodayHook] 拦截显示: %@", NSStringFromClass([self class]));
+            return;
+        }
+    }
+    if (orig_setHidden) orig_setHidden(self, _cmd, h);
+}
+
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
     gAppWindow = (UIWindow *)self;
     if (gLockVC) {
         LCHideAppUI(YES);
+        if (LCIsHudObject(self)) {
+            ((UIWindow *)self).hidden = YES;
+            ((UIWindow *)self).alpha = 0.0;
+            NSLog(@"[TodayHook] 拦截 HUD 窗口显示");
+            return;
+        }
         ((UIWindow *)self).alpha = 0.0;
         ((UIWindow *)self).hidden = YES;
         // 进程级门禁：未激活却反复想显示自己的界面 → 直接退出，绝不让 HUD 出现
@@ -745,6 +786,12 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(vw);
         method_setImplementation(vw, (IMP)my_vwa);
         NSLog(@"[TodayHook] viewWillAppear 已挂载");
+    }
+    Method hm = wc ? class_getInstanceMethod(wc, @selector(setHidden:)) : NULL;
+    if (hm) {
+        orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
+        method_setImplementation(hm, (IMP)my_setHidden);
+        NSLog(@"[TodayHook] setHidden 已挂载");
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

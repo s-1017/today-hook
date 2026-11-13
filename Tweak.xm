@@ -712,7 +712,7 @@ static BOOL LCIsHudObject(id o) {
 // 允许显示的：我们的锁 / 键盘 / 状态栏 / 系统弹窗
 static BOOL LCAllowedWindow(id w) {
     if (w == gLockWin) return YES;
-    if (w == gAppWin) return YES;
+    if (w == gAppWindow) return YES;
     NSString *n = NSStringFromClass([w class]);
     if ([n containsString:@"Keyboard"]) return YES;
     if ([n containsString:@"TextEffects"]) return YES;

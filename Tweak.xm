@@ -560,6 +560,14 @@ static void LCUnlock(void) {
         orig_setRootVC(gRootHost, @selector(setRootViewController:), gRealRoot);
         NSLog(@"[TodayHook] 已恢复 App 根控制器");
     }
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        UIViewController *r = win.rootViewController;
+        if (r && ![r isKindOfClass:[LCLockVC class]]) {
+            r.view.hidden = NO;
+            r.view.alpha = 1.0;
+            r.view.userInteractionEnabled = YES;
+        }
+    }
     LCHideAppUI(NO);
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
@@ -571,16 +579,6 @@ static void LCGuardTick(void) {
     if (gUnlocked) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
-    }
-    // 根控制器被换 → 立刻换回（不留一帧）
-    if (gRootHost && gLockVC && orig_setRootVC) {
-        UIViewController *cur = gRootHost.rootViewController;
-        if (cur && cur != gLockVC && ![cur isKindOfClass:[LCLockVC class]]) {
-            if (!gRealRoot) gRealRoot = cur;
-            gInHook = YES;
-            orig_setRootVC(gRootHost, @selector(setRootViewController:), gLockVC);
-            gInHook = NO;
-        }
     }
     // 锁被关掉 → 重新呈现
     if (!gLockVC || !gLockVC.presentingViewController) {
@@ -647,6 +645,21 @@ static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
     return;
 }
 
+
+// 任何控制器即将显示时：未解锁就把它的视图藏掉（在绘制之前，零帧泄漏）
+static void (*orig_vwa)(id, SEL, BOOL) = NULL;
+
+static void my_vwa(id self, SEL _cmd, BOOL animated) {
+    if (orig_vwa) orig_vwa(self, _cmd, animated);
+    if (gUnlocked) return;
+    if ([self isKindOfClass:[LCLockVC class]]) return;
+    UIViewController *vc = (UIViewController *)self;
+    if ([vc isKindOfClass:[UIAlertController class]]) return;   // 别把我们的弹窗藏了
+    if (![vc isKindOfClass:[UIViewController class]]) return;
+    vc.view.hidden = YES;
+    vc.view.alpha = 0.0;
+}
+
 #pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
@@ -680,11 +693,12 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)my_makeKeyAndVisible);
     }
-    Method rm2 = wc ? class_getInstanceMethod(wc, @selector(setRootViewController:)) : NULL;
-    if (rm2) {
-        orig_setRootVC = (void (*)(id, SEL, UIViewController *))method_getImplementation(rm2);
-        method_setImplementation(rm2, (IMP)my_setRootVC);
-        NSLog(@"[TodayHook] setRootViewController 已挂载");
+    Method vw = class_getInstanceMethod(objc_getClass("UIViewController"),
+                                        @selector(viewWillAppear:));
+    if (vw) {
+        orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(vw);
+        method_setImplementation(vw, (IMP)my_vwa);
+        NSLog(@"[TodayHook] viewWillAppear 已挂载");
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

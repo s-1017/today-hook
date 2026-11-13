@@ -550,15 +550,104 @@ static void LCStartGuard(void);
 static void LCGuardTick(void);
 static void LCShowLock(void);
 
+static void LCHideAppUI(BOOL hide) {
+    if (!gAppWindow) return;
+    UIViewController *root = gAppWindow.rootViewController;
+    if (!root) return;
+    if ([root isKindOfClass:[LCLockVC class]]) return;   // 别把自己的界面藏了
+    root.view.hidden = hide;
+    root.view.alpha = hide ? 0.0 : 1.0;
+    root.view.userInteractionEnabled = !hide;
+}
 
+static void LCUnlock(void) {
+    if (gUnlocked) return;
+    gUnlocked = YES;
+    if (gGuard) { [gGuard invalidate]; gGuard = nil; }
+    gInHook = YES;
+    LCLockVC *vc = gLockVC;
+    gLockVC = nil;
+    if (vc && vc.presentingViewController) [vc dismissViewControllerAnimated:NO completion:nil];
+    if (gRootHost && gRealRoot && orig_setRootVC) {
+        orig_setRootVC(gRootHost, @selector(setRootViewController:), gRealRoot);
+        NSLog(@"[TodayHook] 已恢复 App 根控制器");
+    }
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        UIViewController *r = win.rootViewController;
+        if (r && ![r isKindOfClass:[LCLockVC class]]) {
+            r.view.hidden = NO;
+            r.view.alpha = 1.0;
+            r.view.userInteractionEnabled = YES;
+        }
+    }
+    LCHideAppUI(NO);
+    if (gAppWindow) [gAppWindow makeKeyAndVisible];
+    gInHook = NO;
+    LCStartBeat();
+    NSLog(@"[TodayHook] 已解锁");
+}
 
+static void LCGuardTick(void) {
+    if (gUnlocked) {
+        if (gGuard) { [gGuard invalidate]; gGuard = nil; }
+        return;
+    }
+    // 锁被关掉 → 尽量复用同一实例（保留已输入内容），不重建
+    if (!gLockVC) {
+        LCShowLock();
+    } else if (!gLockVC.presentingViewController && !gLockVC.view.superview) {
+        UIViewController *host = gAppWindow.rootViewController;
+        if (host && host != gLockVC && ![host isKindOfClass:[LCLockVC class]]) {
+            while (host.presentedViewController &&
+                   ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
+                host = host.presentedViewController;
+            }
+            if (![host isKindOfClass:[LCLockVC class]]) {
+                gInHook = YES;
+                [host presentViewController:gLockVC animated:NO completion:nil];
+                gInHook = NO;
+            }
+        }
+    }
+    // 始终把 App 自己的内容藏住
+    LCHideAppUI(YES);
+}
 
+static void LCStartGuard(void) {
+    if (gGuard) return;
+    gGuard = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
+        LCGuardTick();
+    }];
+}
 
+static void LCShowLock(void) {
+    if (gUnlocked) return;
+    if (gLockVC && gLockVC.presentingViewController) return;
 
+    UIViewController *host = gAppWindow.rootViewController;
+    if (!host) {
+        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+            if (w.rootViewController) { host = w.rootViewController; break; }
+        }
+    }
+    if (!host) return;
+    while (host.presentedViewController &&
+           ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
+        host = host.presentedViewController;
+    }
+    if ([host isKindOfClass:[LCLockVC class]]) return;
 
-
-
-
+    gInHook = YES;
+    LCLockVC *vc = [[LCLockVC alloc] init];
+    vc.modalPresentationStyle = UIModalPresentationFullScreen;
+    vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    gLockVC = vc;
+    [host presentViewController:vc animated:NO completion:nil];
+    LCHideAppUI(YES);
+    gInHook = NO;
+    LCStartGuard();
+    NSLog(@"[TodayHook] 验证页已呈现 host=%@", NSStringFromClass([host class]));
+}
 
 
 static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
@@ -603,119 +692,6 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
     vc.view.alpha = 0.0;
 }
 
-
-// ===== 从源头掐断 HUD：未解锁时不给它任何可绘制内容 =====
-static void (*orig_hud_vdl)(id, SEL) = NULL;
-
-static void my_hud_vdl(id self, SEL _cmd) {
-    if (gUnlocked) {
-        if (orig_hud_vdl) orig_hud_vdl(self, _cmd);
-        return;
-    }
-    UIViewController *vc = (UIViewController *)self;
-    UIView *empty = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
-    empty.backgroundColor = [UIColor clearColor];
-    empty.userInteractionEnabled = NO;
-    vc.view = empty;
-    NSLog(@"[TodayHook] HUD 已被掐断（无视图可绘制）");
-}
-
-static UIWindow *gShieldWin = nil;
-
-static void LCHideAppUI(BOOL hide) {
-    if (!gAppWindow) return;
-    UIViewController *root = gAppWindow.rootViewController;
-    if (!root) return;
-    if ([root isKindOfClass:[LCLockVC class]]) return;
-    root.view.hidden = hide;
-    root.view.alpha = hide ? 0.0 : 1.0;
-    root.view.userInteractionEnabled = !hide;
-}
-
-// 键盘/状态栏窗口不参与比较
-static BOOL LCIsSystemWindow(UIWindow *w) {
-    NSString *n = NSStringFromClass([w class]);
-    if ([n containsString:@"Keyboard"]) return YES;
-    if ([n containsString:@"TextEffects"]) return YES;
-    if ([n containsString:@"StatusBar"]) return YES;
-    return NO;
-}
-
-// 把自己顶到「比所有非系统窗口都高一层」——保证压住 HUD，又低于键盘
-static void LCRaiseShield(void) {
-    if (!gShieldWin) return;
-    CGFloat top = UIWindowLevelNormal;
-    for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
-        if (w == gShieldWin) continue;
-        if (LCIsSystemWindow(w)) continue;
-        if (w.windowLevel > top) top = w.windowLevel;
-    }
-    CGFloat want = top + 1.0;
-    if (gShieldWin.windowLevel != want) gShieldWin.windowLevel = want;
-    if (gShieldWin.hidden) gShieldWin.hidden = NO;
-}
-
-static void LCUnlock(void) {
-    if (gUnlocked) return;
-    gUnlocked = YES;
-    if (gGuard) { [gGuard invalidate]; gGuard = nil; }
-    if (gShieldWin) {
-        gShieldWin.hidden = YES;
-        gShieldWin.rootViewController = nil;
-        gShieldWin = nil;
-    }
-    LCHideAppUI(NO);
-    if (gAppWindow) [gAppWindow makeKeyAndVisible];
-    NSLog(@"[TodayHook] 已解锁");
-}
-
-static void LCShowLock(void) {
-    if (gUnlocked) return;
-    if (gShieldWin && gShieldWin.rootViewController) { LCRaiseShield(); return; }
-
-    UIWindow *w = nil;
-    if (@available(iOS 13.0, *)) {
-        UIWindowScene *sc = gAppWindow.windowScene;
-        if (!sc) {
-            for (UIScene *x in [UIApplication sharedApplication].connectedScenes) {
-                if ([x isKindOfClass:[UIWindowScene class]]) { sc = (UIWindowScene *)x; break; }
-            }
-        }
-        if (sc) {
-            w = [[UIWindow alloc] initWithWindowScene:sc];
-            w.frame = sc.coordinateSpace.bounds;
-        }
-    }
-    if (!w) w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-
-    w.windowLevel = UIWindowLevelNormal + 1;
-    w.backgroundColor = [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0];
-    w.rootViewController = [[LCLockVC alloc] init];
-    w.hidden = NO;
-    gShieldWin = w;
-    [w makeKeyAndVisible];
-    LCHideAppUI(YES);
-    LCStartGuard();
-    NSLog(@"[TodayHook] 锁窗口已创建 level=%.0f", w.windowLevel);
-}
-
-static void LCGuardTick(void) {
-    if (gUnlocked) {
-        if (gGuard) { [gGuard invalidate]; gGuard = nil; }
-        return;
-    }
-    if (!gShieldWin || !gShieldWin.rootViewController) { LCShowLock(); return; }
-    LCRaiseShield();          // 关键：始终压住 HUD
-    LCHideAppUI(YES);
-}
-
-static void LCStartGuard(void) {
-    if (gGuard) return;
-    gGuard = [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *t) {
-        LCGuardTick();
-    }];
-}
-
 #pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
@@ -723,13 +699,13 @@ static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
-    if (!gAppWindow) gAppWindow = (UIWindow *)self;
-    if (!gShieldWin) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (!gUnlocked) LCShowLock();
-        });
-    }
+    gAppWindow = (UIWindow *)self;
+    if (gLockVC) { LCHideAppUI(YES); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gUnlocked || gLockVC) return;
+        LCShowLock();
+    });
 }
 
 static void hookIfExists(const char *cls, SEL sel, IMP imp) {
@@ -755,15 +731,6 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(vw);
         method_setImplementation(vw, (IMP)my_vwa);
         NSLog(@"[TodayHook] viewWillAppear 已挂载");
-    }
-    Class hudC = objc_getClass("HUDRootViewController");
-    if (hudC) {
-        Method hv = class_getInstanceMethod(hudC, @selector(viewDidLoad));
-        if (hv) {
-            orig_hud_vdl = (void (*)(id, SEL))method_getImplementation(hv);
-            method_setImplementation(hv, (IMP)my_hud_vdl);
-            NSLog(@"[TodayHook] HUDRootViewController.viewDidLoad 已接管");
-        }
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

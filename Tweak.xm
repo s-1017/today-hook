@@ -498,20 +498,7 @@ static void LCStartBeat(void) {
     }];
 }
 
-static void LCHideAppUI(BOOL hide) {
-    if (!gAppWindow) return;
-    UIViewController *root = gAppWindow.rootViewController;
-    if (!root) return;
-    if (hide) {
-        root.view.hidden = YES;
-        root.view.alpha = 0.0;
-        root.view.userInteractionEnabled = NO;
-    } else {
-        root.view.hidden = NO;
-        root.view.alpha = 1.0;
-        root.view.userInteractionEnabled = YES;
-    }
-}
+
 
 
 
@@ -528,39 +515,9 @@ static void LCForceLock(NSString *reason) {
     });
 }
 
-static void LCGuardTick(void) {
-    if (gUnlocked) {
-        if (gGuard) { [gGuard invalidate]; gGuard = nil; }
-        return;
-    }
-    if (!gLockVC || !gLockVC.view.superview) {
-        LCShowLock();
-        return;
-    }
-    UIWindow *host = gLockWin ?: gAppWindow;
-    if (host) {
-        if (host.hidden) host.hidden = NO;
-        if (gLockVC.view.superview != host) [host addSubview:gLockVC.view];
-        [host bringSubviewToFront:gLockVC.view];
-        UIViewController *root = host.rootViewController;
-        if (root && root.view != gLockVC.view && !root.view.hidden) {
-            root.view.hidden = YES;
-            root.view.alpha = 0.0;
-        }
-    }
-    // 其它窗口一律隐藏
-    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        if (win == host) continue;
-        if (!win.hidden) win.hidden = YES;
-    }
-}
 
-static void LCStartGuard(void) {
-    if (gGuard) return;
-    gGuard = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *t) {
-        LCGuardTick();
-    }];
-}
+
+
 
 static UIViewController *gRealRootVC = nil;
 static UIWindow *gHostWindow = nil;

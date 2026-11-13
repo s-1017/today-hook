@@ -513,24 +513,7 @@ static void LCHideAppUI(BOOL hide) {
     }
 }
 
-static void LCUnlock(void) {
-    if (gUnlocked) return;
-    gUnlocked = YES;
-    if (gGuard) { [gGuard invalidate]; gGuard = nil; }
-    gInHook = YES;
-    LCLockVC *lock = gLockVC;
-    gLockVC = nil;
-    if (gHostWindow && gRealRootVC && orig_setRootVC) {
-        orig_setRootVC(gHostWindow, @selector(setRootViewController:), gRealRootVC);
-    } else if (lock && orig_setRootVC && gHostWindow) {
-        orig_setRootVC(gHostWindow, @selector(setRootViewController:), nil);
-    }
-    for (UIWindow *win in [[UIApplication sharedApplication] windows]) win.hidden = NO;
-    if (gHostWindow) [gHostWindow makeKeyAndVisible];
-    gInHook = NO;
-    LCStartBeat();
-    NSLog(@"[TodayHook] 已解锁，已恢复 App 界面");
-}
+
 
 static void LCForceLock(NSString *reason) {
     gUnlocked = NO;
@@ -587,39 +570,10 @@ static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
 static void LCStartGuard(void);
 static void LCGuardTick(void);
 
-static void LCInstallLock(void) {
-    if (gUnlocked || !gHostWindow) return;
-    if (gLockVC) return;
-    LCLockVC *lock = [[LCLockVC alloc] init];
-    gLockVC = lock;
-    gInHook = YES;
-    if (orig_setRootVC) orig_setRootVC(gHostWindow, @selector(setRootViewController:), lock);
-    gInHook = NO;
-    [gHostWindow makeKeyAndVisible];
-    LCStartGuard();
-    NSLog(@"[TodayHook] 根控制器已替换为验证页");
-}
+
 
 // App 每次设置根控制器时都被我们截住
-static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
-    UIWindow *win = (UIWindow *)self;
-    if (gUnlocked) {
-        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
-        return;
-    }
-    if (gInHook) {
-        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
-        return;
-    }
-    if ([vc isKindOfClass:[LCLockVC class]]) {
-        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
-        return;
-    }
-    // 记住 App 真正的根控制器，界面先不发出去
-    if (vc && !gRealRootVC) gRealRootVC = vc;
-    gHostWindow = win;
-    LCInstallLock();
-}
+
 
 static void LCHideAppUI(BOOL hide);
 static void LCStartGuard(void);

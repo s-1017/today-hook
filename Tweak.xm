@@ -136,6 +136,30 @@ static BOOL kcSet(NSString *v) {
     return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
 }
 
+static void stampOnline(NSString *code) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    NSDictionary *old = [u objectForKey:kStoreKey];
+    if ([old isKindOfClass:[NSDictionary class]]) [d addEntriesFromDictionary:old];
+    d[@"o"] = @([[NSDate date] timeIntervalSince1970]);
+    d[@"dv"] = deviceId();
+    d[@"c"] = code ?: @"";
+    [u setObject:d forKey:kStoreKey];
+    [u synchronize];
+}
+
+// 离线放行必须：同一设备 + 同一卡密 + 24 小时内联网成功过
+static BOOL offlineAllowed(NSString *code) {
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    if (![d isKindOfClass:[NSDictionary class]]) return NO;
+    NSString *c = d[@"c"], *dv = d[@"dv"];
+    if (![c isKindOfClass:[NSString class]] || ![c isEqualToString:code]) return NO;
+    if (![dv isKindOfClass:[NSString class]] || ![dv isEqualToString:deviceId()]) return NO;
+    double o = [d[@"o"] doubleValue];
+    if (o <= 0) return NO;
+    return ([[NSDate date] timeIntervalSince1970] - o) < 24 * 3600;
+}
+
 static NSString *deviceId(void) {
     NSString *v = kcGet();
     if (v.length) return v;
@@ -399,6 +423,7 @@ static void LCForceLock(NSString *reason);
 
         if (reachable && ok && exp > 0) {
             saveLicense(code, exp);
+            stampOnline(code);
             self->_status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
             self->_status.text = [NSString stringWithFormat:@"验证通过 · 有效期至 %@", fmtTime(exp)];
             [self->_btn setTitle:@"进 入 中…" forState:UIControlStateNormal];
@@ -411,7 +436,12 @@ static void LCForceLock(NSString *reason);
             self->_status.text = msg.length ? msg : @"验证失败";
             return;
         }
-        // 网络不可达 → 离线兜底（同样是"首次激活起算"）
+        // 网络不可达 → 离线兜底（必须本机联网验证过且在 24h 内）
+        if (!offlineAllowed(code)) {
+            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+            self->_status.text = @"无法连接服务器。设备锁需要联网校验，请检查网络后重试";
+            return;
+        }
         NSInteger days = verifyCodeDays(code);
         if (days > 0) {
             double act = [[NSDate date] timeIntervalSince1970];
@@ -446,7 +476,7 @@ static void LCStartBeat(void) {
         if (!c.length) return;
         [LCNet request:@"heartbeat" code:c done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
             if (!reachable) return;                 // 离线：放行，等下次
-            if (ok && exp > 0) { saveLicense(c, exp); return; }
+            if (ok && exp > 0) { saveLicense(c, exp); stampOnline(c); return; }
             NSLog(@"[TodayHook] 服务器判定失效: %@", msg);
             clearLicense();
             LCForceLock(msg.length ? msg : @"授权已失效");

@@ -654,8 +654,16 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
     if (gUnlocked) return;
     if ([self isKindOfClass:[LCLockVC class]]) return;
     UIViewController *vc = (UIViewController *)self;
-    if ([vc isKindOfClass:[UIAlertController class]]) return;   // 别把我们的弹窗藏了
     if (![vc isKindOfClass:[UIViewController class]]) return;
+    // 只处理 App 主窗口里的顶层控制器，绝不碰键盘/弹窗容器
+    NSString *cls = NSStringFromClass([vc class]);
+    if ([cls containsString:@"Keyboard"] || [cls containsString:@"Input"] ||
+        [cls containsString:@"TextEffects"] || [cls containsString:@"Alert"] ||
+        [cls containsString:@"Remote"] || [cls containsString:@"Lock"] ||
+        [cls containsString:@"Window"]) return;
+    if (vc.parentViewController != nil) return;          // 子控制器不动
+    if (vc.presentedViewController != nil) return;       // 有模态的不动
+    if (gAppWindow && vc.view.window && vc.view.window != gAppWindow) return;  // 只处理主窗口
     vc.view.hidden = YES;
     vc.view.alpha = 0.0;
 }

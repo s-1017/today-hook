@@ -321,8 +321,13 @@ static void LCForceLock(NSString *reason);
     _field.leftViewMode = UITextFieldViewModeAlways;
     [_card addSubview:_field];
 
+    // 恢复上次输入（未验证也不会丢）
+    NSString *typed = [[NSUserDefaults standardUserDefaults] objectForKey:@"_today_typed"];
     NSString *saved = savedCode();
-    if (saved.length) _field.text = saved;
+    if (typed.length) _field.text = typed;
+    else if (saved.length) _field.text = saved;
+    [_field addTarget:self action:@selector(onEdit)
+     forControlEvents:UIControlEventEditingChanged];
 
     _btn = [UIButton buttonWithType:UIButtonTypeSystem];
     _btn.frame = CGRectMake(10, 108, cardW - 20, 54);
@@ -406,6 +411,12 @@ static void LCForceLock(NSString *reason);
     [self presentViewController:ac animated:YES completion:nil];
 }
 
+- (void)onEdit {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u setObject:(self.field.text ?: @"") forKey:@"_today_typed"];
+    [u synchronize];
+}
+
 - (void)doClear {
     clearLicense();
     _field.text = @"";
@@ -440,6 +451,7 @@ static void LCForceLock(NSString *reason);
         if (reachable && ok && exp > 0) {
             saveLicense(code, exp);
             stampOnline(code);
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"_today_typed"];
             self->_status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
             self->_status.text = [NSString stringWithFormat:@"验证通过 · 有效期至 %@", fmtTime(exp)];
             [self->_btn setTitle:@"进 入 中…" forState:UIControlStateNormal];
@@ -580,10 +592,22 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    // 锁被关掉 → 重新呈现
-    if (!gLockVC || !gLockVC.presentingViewController) {
-        gLockVC = nil;
+    // 锁被关掉 → 尽量复用同一实例（保留已输入内容），不重建
+    if (!gLockVC) {
         LCShowLock();
+    } else if (!gLockVC.presentingViewController && !gLockVC.view.superview) {
+        UIViewController *host = gAppWindow.rootViewController;
+        if (host && host != gLockVC && ![host isKindOfClass:[LCLockVC class]]) {
+            while (host.presentedViewController &&
+                   ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
+                host = host.presentedViewController;
+            }
+            if (![host isKindOfClass:[LCLockVC class]]) {
+                gInHook = YES;
+                [host presentViewController:gLockVC animated:NO completion:nil];
+                gInHook = NO;
+            }
+        }
     }
     // 始终把 App 自己的内容藏住
     LCHideAppUI(YES);

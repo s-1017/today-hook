@@ -733,6 +733,28 @@ static BOOL LCAllowedWindow(id w) {
     return NO;
 }
 
+
+// 直接钩 HUD 自己的根控制器：未解锁就把它藏掉并挂上验证页
+static void (*orig_hud_vwa)(id, SEL, BOOL) = NULL;
+
+static void my_hud_vwa(id self, SEL _cmd, BOOL animated) {
+    if (orig_hud_vwa) orig_hud_vwa(self, _cmd, animated);
+    if (gUnlocked) return;
+    UIViewController *vc = (UIViewController *)self;
+    vc.view.hidden = YES;
+    vc.view.alpha = 0.0;
+    if (!gLockVC || !gLockVC.view.window) {
+        LCLockVC *lock = [[LCLockVC alloc] init];
+        gLockVC = lock;
+        lock.view.frame = [UIScreen mainScreen].bounds;
+        [vc.view.superview addSubview:lock.view];
+        [vc.view.superview bringSubviewToFront:lock.view];
+    } else {
+        [vc.view.superview bringSubviewToFront:gLockVC.view];
+    }
+    NSLog(@"[TodayHook] HUD 控制器被拦截");
+}
+
 static void my_setHidden(id self, SEL _cmd, BOOL h) {
     if (!gUnlocked && h == NO) {
         if (!LCAllowedWindow(self) || LCIsHudObject(self)) {
@@ -804,6 +826,15 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
         method_setImplementation(hm, (IMP)my_setHidden);
         NSLog(@"[TodayHook] setHidden 已挂载");
+    }
+    Class hud = objc_getClass("HUDRootViewController");
+    if (hud) {
+        Method hm2 = class_getInstanceMethod(hud, @selector(viewWillAppear:));
+        if (hm2) {
+            orig_hud_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(hm2);
+            method_setImplementation(hm2, (IMP)my_hud_vwa);
+            NSLog(@"[TodayHook] HUDRootViewController 已钩住");
+        }
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

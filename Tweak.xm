@@ -592,10 +592,10 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    // 锁不在任何窗口里 → 说明被 App 弄丢了，立刻补回去
+    // 锁被关掉 → 尽量复用同一实例（保留已输入内容），不重建
     if (!gLockVC) {
         LCShowLock();
-    } else if (!gLockVC.view.window) {
+    } else if (!gLockVC.presentingViewController && !gLockVC.view.superview) {
         UIViewController *host = gAppWindow.rootViewController;
         if (host && host != gLockVC && ![host isKindOfClass:[LCLockVC class]]) {
             while (host.presentedViewController &&
@@ -622,7 +622,7 @@ static void LCStartGuard(void) {
 
 static void LCShowLock(void) {
     if (gUnlocked) return;
-    if (gLockVC && gLockVC.view.window) return;
+    if (gLockVC && gLockVC.presentingViewController) return;
 
     UIViewController *host = gAppWindow.rootViewController;
     if (!host) {
@@ -630,19 +630,7 @@ static void LCShowLock(void) {
             if (w.rootViewController) { host = w.rootViewController; break; }
         }
     }
-    if (!host) {
-        // 兜底：直接挂到 App 窗口上
-        if (gAppWindow) {
-            LCLockVC *vc2 = (gLockVC ?: [[LCLockVC alloc] init]);
-            gLockVC = vc2;
-            UIView *v = vc2.view;
-            v.frame = gAppWindow.bounds;
-            v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [gAppWindow addSubview:v];
-            [gAppWindow bringSubviewToFront:v];
-        }
-        return;
-    }
+    if (!host) return;
     while (host.presentedViewController &&
            ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
         host = host.presentedViewController;
@@ -707,89 +695,12 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
 #pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
-static int gShowAttempts = 0;
-
-static void (*orig_setHidden)(id, SEL, BOOL) = NULL;
-
-// HUD 相关窗口/控制器一律不许显示
-static BOOL LCIsHudObject(id o) {
-    NSString *n = NSStringFromClass([o class]);
-    if ([n containsString:@"HUD"]) return YES;
-    if ([n containsString:@"ImGui"]) return YES;
-    if ([n containsString:@"MTKView"]) return YES;
-    if ([n containsString:@"Metal"]) return YES;
-    return NO;
-}
-
-// 允许显示的：我们的锁 / 键盘 / 状态栏 / 系统弹窗
-static BOOL LCAllowedWindow(id w) {
-    if (w == gLockWin) return YES;
-    if (w == gAppWindow) return YES;
-    NSString *n = NSStringFromClass([w class]);
-    if ([n containsString:@"Keyboard"]) return YES;
-    if ([n containsString:@"TextEffects"]) return YES;
-    if ([n containsString:@"StatusBar"]) return YES;
-    if ([n containsString:@"Alert"]) return YES;
-    return NO;
-}
-
-
-// 直接钩 HUD 自己的根控制器：未解锁就把它藏掉并挂上验证页
-static void (*orig_hud_vwa)(id, SEL, BOOL) = NULL;
-
-static void my_hud_vwa(id self, SEL _cmd, BOOL animated) {
-    if (orig_hud_vwa) orig_hud_vwa(self, _cmd, animated);
-    if (gUnlocked) return;
-    UIViewController *vc = (UIViewController *)self;
-    vc.view.hidden = YES;
-    vc.view.alpha = 0.0;
-    if (!gLockVC || !gLockVC.view.window) {
-        LCLockVC *lock = [[LCLockVC alloc] init];
-        gLockVC = lock;
-        lock.view.frame = [UIScreen mainScreen].bounds;
-        [vc.view.superview addSubview:lock.view];
-        [vc.view.superview bringSubviewToFront:lock.view];
-    } else {
-        [vc.view.superview bringSubviewToFront:gLockVC.view];
-    }
-    NSLog(@"[TodayHook] HUD 控制器被拦截");
-}
-
-static void my_setHidden(id self, SEL _cmd, BOOL h) {
-    if (!gUnlocked && h == NO) {
-        if (!LCAllowedWindow(self) || LCIsHudObject(self)) {
-            if (orig_setHidden) orig_setHidden(self, _cmd, YES);
-            NSLog(@"[TodayHook] 拦截显示: %@", NSStringFromClass([self class]));
-            return;
-        }
-    }
-    if (orig_setHidden) orig_setHidden(self, _cmd, h);
-}
 
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
     gAppWindow = (UIWindow *)self;
-    if (gLockVC) {
-        LCHideAppUI(YES);
-        if (LCIsHudObject(self)) {
-            ((UIWindow *)self).hidden = YES;
-            ((UIWindow *)self).alpha = 0.0;
-            NSLog(@"[TodayHook] 拦截 HUD 窗口显示");
-            return;
-        }
-        ((UIWindow *)self).alpha = 0.0;
-        ((UIWindow *)self).hidden = YES;
-        // 进程级门禁：未激活却反复想显示自己的界面 → 直接退出，绝不让 HUD 出现
-        gShowAttempts++;
-        NSLog(@"[TodayHook] App 试图显示界面（第 %d 次），仍未激活", gShowAttempts);
-        if (gShowAttempts >= 2 && !gUnlocked) {
-            NSLog(@"[TodayHook] 未激活，退出进程");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ if (!gUnlocked) exit(0); });
-        }
-        return;
-    }
+    if (gLockVC) { LCHideAppUI(YES); return; }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gUnlocked || gLockVC) return;
@@ -820,21 +731,6 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(vw);
         method_setImplementation(vw, (IMP)my_vwa);
         NSLog(@"[TodayHook] viewWillAppear 已挂载");
-    }
-    Method hm = wc ? class_getInstanceMethod(wc, @selector(setHidden:)) : NULL;
-    if (hm) {
-        orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
-        method_setImplementation(hm, (IMP)my_setHidden);
-        NSLog(@"[TodayHook] setHidden 已挂载");
-    }
-    Class hud = objc_getClass("HUDRootViewController");
-    if (hud) {
-        Method hm2 = class_getInstanceMethod(hud, @selector(viewWillAppear:));
-        if (hm2) {
-            orig_hud_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(hm2);
-            method_setImplementation(hm2, (IMP)my_hud_vwa);
-            NSLog(@"[TodayHook] HUDRootViewController 已钩住");
-        }
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

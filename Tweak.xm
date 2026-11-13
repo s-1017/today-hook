@@ -557,6 +557,20 @@ static void LCGuardTick(void) {
         gInHook = NO;
     }
     LCHideAppUI(YES);          // 未解锁时 App 界面始终保持隐藏
+
+    // 关键：把所有非锁屏窗口直接隐藏（App 换新窗口也压得住）
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        if (win == gLockWin) continue;
+        if (!win.hidden) win.hidden = YES;
+        if (![win isKindOfClass:[UIWindow class]]) continue;
+        UIViewController *rvc = win.rootViewController;
+        if (rvc && !rvc.view.hidden) {
+            rvc.view.hidden = YES;
+            rvc.view.alpha = 0.0;
+            rvc.view.userInteractionEnabled = NO;
+        }
+    }
+
     // 场景被换掉（App 重建场景）→ 重新挂载
     if (@available(iOS 13.0, *)) {
         if (!gLockWin.windowScene) {
@@ -626,14 +640,29 @@ static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
-    if (gInHook) return;
-    if (gLockVC) return;
     gAppWindow = (UIWindow *)self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+    if (gInHook) return;
+    if (gLockVC) {
+        LCHideAppUI(YES);
+        return;
+    }
+    LCHideAppUI(YES);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gUnlocked || gLockVC) return;
         LCShowLock();
     });
+}
+
+// 硬拦截：未解锁期间，任何窗口想显示都会被压回隐藏
+static void (*orig_setHidden)(id, SEL, BOOL) = NULL;
+
+static void my_setHidden(id self, SEL _cmd, BOOL h) {
+    if (!gUnlocked && !gInHook && h == NO && self != gLockWin) {
+        if (orig_setHidden) orig_setHidden(self, _cmd, YES);
+        return;
+    }
+    if (orig_setHidden) orig_setHidden(self, _cmd, h);
 }
 
 static void hookIfExists(const char *cls, SEL sel, IMP imp) {
@@ -652,6 +681,11 @@ __attribute__((constructor)) static void todayhook_init(void) {
     if (m) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)my_makeKeyAndVisible);
+    }
+    Method hm = class_getInstanceMethod(objc_getClass("UIWindow"), @selector(setHidden:));
+    if (hm) {
+        orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
+        method_setImplementation(hm, (IMP)my_setHidden);
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

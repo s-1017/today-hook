@@ -518,15 +518,18 @@ static void LCUnlock(void) {
     gUnlocked = YES;
     if (gGuard) { [gGuard invalidate]; gGuard = nil; }
     gInHook = YES;
-    LCLockVC *vc = gLockVC;
+    LCLockVC *lock = gLockVC;
     gLockVC = nil;
-    if (vc) [vc.view removeFromSuperview];
-    LCHideAppUI(NO);
-    if (gAppWindow) [gAppWindow makeKeyAndVisible];
+    if (gHostWindow && gRealRootVC && orig_setRootVC) {
+        orig_setRootVC(gHostWindow, @selector(setRootViewController:), gRealRootVC);
+    } else if (lock && orig_setRootVC && gHostWindow) {
+        orig_setRootVC(gHostWindow, @selector(setRootViewController:), nil);
+    }
     for (UIWindow *win in [[UIApplication sharedApplication] windows]) win.hidden = NO;
+    if (gHostWindow) [gHostWindow makeKeyAndVisible];
     gInHook = NO;
     LCStartBeat();
-    NSLog(@"[TodayHook] 已解锁");
+    NSLog(@"[TodayHook] 已解锁，已恢复 App 界面");
 }
 
 static void LCForceLock(NSString *reason) {
@@ -576,39 +579,70 @@ static void LCStartGuard(void) {
     }];
 }
 
-static void LCShowLock(void) {
-    if (gUnlocked) return;
-    if (gLockVC && gLockVC.view.superview) return;
+static UIViewController *gRealRootVC = nil;
+static UIWindow *gHostWindow = nil;
 
-    UIWindow *host = gAppWindow;
-    if (!host) {
-        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
-            if (w.rootViewController) { host = w; break; }
-        }
-    }
-    if (!host) return;
-    gAppWindow = host;
+static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
 
+static void LCInstallLock(void) {
+    if (gUnlocked || !gHostWindow) return;
+    if (gLockVC) return;
+    LCLockVC *lock = [[LCLockVC alloc] init];
+    gLockVC = lock;
     gInHook = YES;
-    host.hidden = NO;
-    LCLockVC *vc = [[LCLockVC alloc] init];
-    UIView *v = vc.view;                       // 触发 loadView，frame=全屏
-    v.frame = host.bounds;
-    v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [host addSubview:v];
-    [host bringSubviewToFront:v];
-    gLockVC = vc;
-    gLockWin = host;                           // 复用 App 窗口作为"锁宿主"
-    // 把 App 自己的内容藏掉，只留我们的验证界面
-    UIViewController *root = host.rootViewController;
-    if (root && root.view != v) {
-        root.view.hidden = YES;
-        root.view.alpha = 0.0;
-        root.view.userInteractionEnabled = NO;
-    }
+    if (orig_setRootVC) orig_setRootVC(gHostWindow, @selector(setRootViewController:), lock);
     gInHook = NO;
+    [gHostWindow makeKeyAndVisible];
     LCStartGuard();
-    NSLog(@"[TodayHook] 验证界面已作为子视图挂载");
+    NSLog(@"[TodayHook] 根控制器已替换为验证页");
+}
+
+// App 每次设置根控制器时都被我们截住
+static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
+    UIWindow *win = (UIWindow *)self;
+    if (gUnlocked) {
+        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    if (gInHook) {
+        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    if ([vc isKindOfClass:[LCLockVC class]]) {
+        if (orig_setRootVC) orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    // 记住 App 真正的根控制器，界面先不发出去
+    if (vc && !gRealRootVC) gRealRootVC = vc;
+    gHostWindow = win;
+    LCInstallLock();
+}
+
+static void LCShowLock(void) { LCInstallLock(); }
+
+static void LCGuardTick(void) {
+    if (gUnlocked) {
+        if (gGuard) { [gGuard invalidate]; gGuard = nil; }
+        return;
+    }
+    if (!gHostWindow) return;
+    if (!gLockVC) { LCInstallLock(); return; }
+    // 根控制器被 App 换了 → 再换回我们的
+    if (gHostWindow.rootViewController != gLockVC) {
+        if (!gRealRootVC && gHostWindow.rootViewController &&
+            ![gHostWindow.rootViewController isKindOfClass:[LCLockVC class]]) {
+            gRealRootVC = gHostWindow.rootViewController;
+        }
+        gInHook = YES;
+        if (orig_setRootVC) orig_setRootVC(gHostWindow, @selector(setRootViewController:), gLockVC);
+        gInHook = NO;
+    }
+    if (gHostWindow.hidden) gHostWindow.hidden = NO;
+    if (![gHostWindow isKeyWindow]) {
+        gInHook = YES;
+        [gHostWindow makeKeyAndVisible];
+        gInHook = NO;
+    }
 }
 
 #pragma mark - Hook
@@ -617,19 +651,9 @@ static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
 
 static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
-    if (gUnlocked) return;
-    gAppWindow = (UIWindow *)self;
-    if (gInHook) return;
-    if (gLockVC) {
-        LCHideAppUI(YES);
-        return;
-    }
-    LCHideAppUI(YES);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (gUnlocked || gLockVC) return;
-        LCShowLock();
-    });
+    if (gUnlocked || gInHook) return;
+    if (!gHostWindow) gHostWindow = (UIWindow *)self;
+    if (!gLockVC) LCInstallLock();
 }
 
 // 硬拦截：未解锁期间，任何窗口想显示都会被压回隐藏
@@ -660,10 +684,10 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)my_makeKeyAndVisible);
     }
-    Method hm = class_getInstanceMethod(objc_getClass("UIWindow"), @selector(setHidden:));
-    if (hm) {
-        orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
-        method_setImplementation(hm, (IMP)my_setHidden);
+    Method rm = class_getInstanceMethod(objc_getClass("UIWindow"), @selector(setRootViewController:));
+    if (rm) {
+        orig_setRootVC = (void (*)(id, SEL, UIViewController *))method_getImplementation(rm);
+        method_setImplementation(rm, (IMP)my_setRootVC);
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

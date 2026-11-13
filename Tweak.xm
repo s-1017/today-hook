@@ -136,6 +136,8 @@ static BOOL kcSet(NSString *v) {
     return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
 }
 
+static NSString *deviceId(void);
+
 static void stampOnline(NSString *code) {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     NSMutableDictionary *d = [NSMutableDictionary dictionary];

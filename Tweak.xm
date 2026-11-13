@@ -603,6 +603,23 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
     vc.view.alpha = 0.0;
 }
 
+
+// ===== 从源头掐断 HUD：未解锁时不给它任何可绘制内容 =====
+static void (*orig_hud_vdl)(id, SEL) = NULL;
+
+static void my_hud_vdl(id self, SEL _cmd) {
+    if (gUnlocked) {
+        if (orig_hud_vdl) orig_hud_vdl(self, _cmd);
+        return;
+    }
+    UIViewController *vc = (UIViewController *)self;
+    UIView *empty = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+    empty.backgroundColor = [UIColor clearColor];
+    empty.userInteractionEnabled = NO;
+    vc.view = empty;
+    NSLog(@"[TodayHook] HUD 已被掐断（无视图可绘制）");
+}
+
 static UIWindow *gShieldWin = nil;
 
 static void LCHideAppUI(BOOL hide) {
@@ -738,6 +755,15 @@ __attribute__((constructor)) static void todayhook_init(void) {
         orig_vwa = (void (*)(id, SEL, BOOL))method_getImplementation(vw);
         method_setImplementation(vw, (IMP)my_vwa);
         NSLog(@"[TodayHook] viewWillAppear 已挂载");
+    }
+    Class hudC = objc_getClass("HUDRootViewController");
+    if (hudC) {
+        Method hv = class_getInstanceMethod(hudC, @selector(viewDidLoad));
+        if (hv) {
+            orig_hud_vdl = (void (*)(id, SEL))method_getImplementation(hv);
+            method_setImplementation(hv, (IMP)my_hud_vdl);
+            NSLog(@"[TodayHook] HUDRootViewController.viewDidLoad 已接管");
+        }
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

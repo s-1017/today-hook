@@ -707,6 +707,21 @@ static void my_rvc_vda(id self, SEL _cmd, BOOL animated) {
     NSLog(@"[TodayHook] RootViewController 出现，已挂锁");
 }
 
+static void LCAutoAttach(void) {
+    if (gUnlocked) return;
+    UIWindow *key = nil;
+    for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+        if (w.isKeyWindow) { key = w; break; }
+    }
+    if (!key) return;
+    UIViewController *root = key.rootViewController;
+    if (!root) return;
+    if (root == gLockVC) return;
+    if (gHostVC && gHostVC != root) { /* 换宿主了，重新挂 */ }
+    LCEnsureLockIn(root);
+    if (!gGuard) LCStartGuard();
+}
+
 __attribute__((constructor)) static void todayhook_init(void) {
     Class wc = objc_getClass("UIWindow");
     Method m = wc ? class_getInstanceMethod(wc, @selector(makeKeyAndVisible)) : NULL;
@@ -719,15 +734,19 @@ __attribute__((constructor)) static void todayhook_init(void) {
         Method a = class_getInstanceMethod(rvc, @selector(viewDidAppear:));
         if (a) {
             orig_rvc_vda = (void (*)(id, SEL, BOOL))method_getImplementation(a);
-            class_addMethod(rvc, @selector(viewDidAppear:), (IMP)my_rvc_vda,
-                            method_getTypeEncoding(a));
+            if (!class_addMethod(rvc, @selector(viewDidAppear:), (IMP)my_rvc_vda,
+                                  method_getTypeEncoding(a))) {
+                method_setImplementation(a, (IMP)my_rvc_vda);
+            }
             NSLog(@"[TodayHook] RootViewController.viewDidAppear 已接管");
         }
         Method b = class_getInstanceMethod(rvc, @selector(viewDidLoad));
         if (b) {
             orig_rvc_vdl = (void (*)(id, SEL))method_getImplementation(b);
-            class_addMethod(rvc, @selector(viewDidLoad), (IMP)my_rvc_vdl,
-                            method_getTypeEncoding(b));
+            if (!class_addMethod(rvc, @selector(viewDidLoad), (IMP)my_rvc_vdl,
+                                  method_getTypeEncoding(b))) {
+                method_setImplementation(b, (IMP)my_rvc_vdl);
+            }
             NSLog(@"[TodayHook] RootViewController.viewDidLoad 已接管");
         }
     } else {
@@ -736,5 +755,12 @@ __attribute__((constructor)) static void todayhook_init(void) {
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
     hookIfExists("XQGate", @selector(doBeat), (IMP)gate_noop);
-    NSLog(@"[TodayHook] v12 loaded");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
+            if (gUnlocked) { [t invalidate]; return; }
+            LCAutoAttach();
+        }];
+    });
+    NSLog(@"[TodayHook] v13 loaded");
 }

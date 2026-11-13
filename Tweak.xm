@@ -27,6 +27,7 @@ static BOOL gInHook = NO;
 static BOOL gUnlocked = NO;
 @class LCLockVC;
 static LCLockVC *gLockVC = nil;
+static UIWindow *gLockWin = nil;
 
 #define LC_BLUE [UIColor colorWithRed:0.18 green:0.48 blue:0.96 alpha:1.0]
 #define LC_BG   [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0]
@@ -494,9 +495,13 @@ static void LCUnlock(void) {
     gUnlocked = YES;
     if (gGuard) { [gGuard invalidate]; gGuard = nil; }
     gInHook = YES;
-    LCLockVC *vc = gLockVC;
+    UIWindow *w = gLockWin;
+    gLockWin = nil;
     gLockVC = nil;
-    if (vc) [vc dismissViewControllerAnimated:NO completion:nil];
+    if (w) {
+        w.rootViewController = nil;
+        w.hidden = YES;
+    }
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
     LCStartBeat();
@@ -507,7 +512,7 @@ static void LCForceLock(NSString *reason) {
     gUnlocked = NO;
     if (gBeat) { [gBeat invalidate]; gBeat = nil; }
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!gLockVC) LCShowLock();
+        if (!gLockWin) LCShowLock();
         if (gLockVC) {
             gLockVC.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
             gLockVC.status.text = reason;
@@ -521,7 +526,29 @@ static void LCGuardTick(void) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
     }
-    if (!gLockVC || !gLockVC.view.window) LCShowLock();
+    if (!gLockWin || !gLockWin.rootViewController) {
+        LCShowLock();
+        return;
+    }
+    if (gLockWin.hidden) gLockWin.hidden = NO;
+    if (gLockWin.windowLevel < UIWindowLevelAlert + 10000)
+        gLockWin.windowLevel = UIWindowLevelAlert + 10000;
+    if (![gLockWin isKeyWindow]) {
+        gInHook = YES;
+        [gLockWin makeKeyAndVisible];
+        gInHook = NO;
+    }
+    // 场景被换掉（App 重建场景）→ 重新挂载
+    if (@available(iOS 13.0, *)) {
+        if (!gLockWin.windowScene) {
+            UIWindow *old = gLockWin;
+            gLockWin = nil;
+            gLockVC = nil;
+            old.hidden = YES;
+            old.rootViewController = nil;
+            LCShowLock();
+        }
+    }
 }
 
 static void LCStartGuard(void) {
@@ -533,27 +560,43 @@ static void LCStartGuard(void) {
 
 static void LCShowLock(void) {
     if (gUnlocked) return;
-    if (gLockVC && gLockVC.view.window) return;
+    if (gLockWin && gLockWin.rootViewController) {
+        gLockWin.hidden = NO;
+        if (![gLockWin isKeyWindow]) [gLockWin makeKeyAndVisible];
+        return;
+    }
 
-    UIViewController *host = gAppWindow.rootViewController;
-    if (!host) {
-        for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
-            if (w.rootViewController) { host = w.rootViewController; break; }
+    UIWindowScene *scene = nil;
+    if (@available(iOS 13.0, *)) {
+        if (gAppWindow.windowScene) scene = gAppWindow.windowScene;
+        if (!scene) {
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]] &&
+                    sc.activationState == UISceneActivationStateForegroundActive) {
+                    scene = (UIWindowScene *)sc;
+                    break;
+                }
+            }
         }
     }
-    if (!host) return;
-    while (host.presentedViewController &&
-           ![host.presentedViewController isKindOfClass:[LCLockVC class]]) {
-        host = host.presentedViewController;
-    }
 
-    gInHook = YES;
     LCLockVC *vc = [[LCLockVC alloc] init];
-    vc.modalPresentationStyle = UIModalPresentationFullScreen;
+    UIWindow *w = nil;
+    if (scene) {
+        w = [[UIWindow alloc] initWithWindowScene:scene];
+        w.frame = scene.coordinateSpace.bounds;
+    } else {
+        w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    }
+    w.windowLevel = UIWindowLevelAlert + 10000;
+    w.backgroundColor = [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0];
+    w.rootViewController = vc;
+    w.hidden = NO;
+    gLockWin = w;
     gLockVC = vc;
-    [host presentViewController:vc animated:NO completion:nil];
-    gInHook = NO;
+    [w makeKeyAndVisible];
     LCStartGuard();
+    NSLog(@"[TodayHook] 锁屏窗口已挂载 scene=%@", scene ? @"YES" : @"NO");
 }
 
 #pragma mark - Hook

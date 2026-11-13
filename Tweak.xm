@@ -700,7 +700,13 @@ static void my_makeKeyAndVisible(id self, SEL _cmd) {
     if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
     if (gUnlocked) return;
     gAppWindow = (UIWindow *)self;
-    if (gLockVC) { LCHideAppUI(YES); return; }
+    if (gLockVC) {
+        LCHideAppUI(YES);
+        // App 想显示自己 → 立刻压回不可见（7 秒闪烁的根因）
+        ((UIWindow *)self).alpha = 0.0;
+        ((UIWindow *)self).hidden = YES;
+        return;
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gUnlocked || gLockVC) return;

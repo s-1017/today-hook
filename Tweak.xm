@@ -450,6 +450,29 @@ static void LCInstallLock(void);
 
 @end
 
+#pragma mark - 窗口可见性硬锁
+
+static void (*orig_setHidden)(id, SEL, BOOL) = NULL;
+
+// 允许显示的窗口：我们的锁窗口 / 键盘 / 状态栏
+static BOOL LCWindowAllowed(id win) {
+    if (win == gLockWin) return YES;
+    NSString *n = NSStringFromClass([win class]);
+    if ([n containsString:@"Keyboard"]) return YES;
+    if ([n containsString:@"TextEffects"]) return YES;
+    if ([n containsString:@"StatusBar"]) return YES;
+    if ([n containsString:@"Alert"]) return YES;
+    return NO;
+}
+
+static void my_setHidden(id self, SEL _cmd, BOOL h) {
+    if (!gUnlocked && h == NO && !LCWindowAllowed(self)) {
+        if (orig_setHidden) orig_setHidden(self, _cmd, YES);
+        return;
+    }
+    if (orig_setHidden) orig_setHidden(self, _cmd, h);
+}
+
 #pragma mark - 锁控制
 
 static void LCStartGuard(void);
@@ -544,7 +567,11 @@ static void LCGuardTick(void) {
     if (gLockWin.windowLevel < UIWindowLevelAlert + 10000)
         gLockWin.windowLevel = UIWindowLevelAlert + 10000;
     if (![gLockWin isKeyWindow]) [gLockWin makeKeyAndVisible];
-    LCHideAppWindows(YES);
+    // 其它窗口一律压回隐藏（走原始实现，避免被自己的钩子吞掉）
+    for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+        if (w == gLockWin) continue;
+        if (orig_setHidden) orig_setHidden(w, @selector(setHidden:), YES);
+    }
 }
 
 static void LCStartGuard(void) {
@@ -586,6 +613,12 @@ __attribute__((constructor)) static void todayhook_init(void) {
     if (m) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)my_makeKeyAndVisible);
+    }
+    Method hm = wc ? class_getInstanceMethod(wc, @selector(setHidden:)) : NULL;
+    if (hm) {
+        orig_setHidden = (void (*)(id, SEL, BOOL))method_getImplementation(hm);
+        method_setImplementation(hm, (IMP)my_setHidden);
+        NSLog(@"[TodayHook] setHidden 硬锁已挂载");
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

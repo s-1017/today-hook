@@ -519,10 +519,7 @@ static void LCForceLock(NSString *reason) {
 
 
 
-static UIViewController *gRealRootVC = nil;
-static UIWindow *gHostWindow = nil;
 
-static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
 
 static void LCStartGuard(void);
 static void LCGuardTick(void);
@@ -554,7 +551,11 @@ static void LCUnlock(void) {
     gInHook = YES;
     LCLockVC *vc = gLockVC;
     gLockVC = nil;
-    if (vc) [vc dismissViewControllerAnimated:NO completion:nil];
+    if (vc && vc.presentingViewController) [vc dismissViewControllerAnimated:NO completion:nil];
+    if (gRootHost && gRealRoot && orig_setRootVC) {
+        orig_setRootVC(gRootHost, @selector(setRootViewController:), gRealRoot);
+        NSLog(@"[TodayHook] 已恢复 App 根控制器");
+    }
     LCHideAppUI(NO);
     if (gAppWindow) [gAppWindow makeKeyAndVisible];
     gInHook = NO;
@@ -566,6 +567,16 @@ static void LCGuardTick(void) {
     if (gUnlocked) {
         if (gGuard) { [gGuard invalidate]; gGuard = nil; }
         return;
+    }
+    // 根控制器被换 → 立刻换回（不留一帧）
+    if (gRootHost && gLockVC && orig_setRootVC) {
+        UIViewController *cur = gRootHost.rootViewController;
+        if (cur && cur != gLockVC && ![cur isKindOfClass:[LCLockVC class]]) {
+            if (!gRealRoot) gRealRoot = cur;
+            gInHook = YES;
+            orig_setRootVC(gRootHost, @selector(setRootViewController:), gLockVC);
+            gInHook = NO;
+        }
     }
     // 锁被关掉 → 重新呈现
     if (!gLockVC || !gLockVC.presentingViewController) {
@@ -612,6 +623,33 @@ static void LCShowLock(void) {
     NSLog(@"[TodayHook] 验证页已呈现 host=%@", NSStringFromClass([host class]));
 }
 
+static UIViewController *gRealRoot = nil;
+static UIWindow *gRootHost = nil;
+static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
+
+static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
+    if (!orig_setRootVC) return;
+    if (gUnlocked || gInHook || [vc isKindOfClass:[LCLockVC class]]) {
+        orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    if (vc) { gRealRoot = vc; gRootHost = (UIWindow *)self; }
+    gInHook = YES;
+    if (!gLockVC) {
+        LCLockVC *lock = [[LCLockVC alloc] init];
+        gLockVC = lock;
+        gRootHost = (UIWindow *)self;
+        orig_setRootVC(self, _cmd, lock);
+        gInHook = NO;
+        LCStartGuard();
+        NSLog(@"[TodayHook] 首次拦截根控制器");
+    } else {
+        orig_setRootVC(self, _cmd, gLockVC);
+        gInHook = NO;
+        NSLog(@"[TodayHook] 再次拦截根控制器");
+    }
+}
+
 #pragma mark - Hook
 
 static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
@@ -644,6 +682,12 @@ __attribute__((constructor)) static void todayhook_init(void) {
     if (m) {
         orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
         method_setImplementation(m, (IMP)my_makeKeyAndVisible);
+    }
+    Method rm2 = wc ? class_getInstanceMethod(wc, @selector(setRootViewController:)) : NULL;
+    if (rm2) {
+        orig_setRootVC = (void (*)(id, SEL, UIViewController *))method_getImplementation(rm2);
+        method_setImplementation(rm2, (IMP)my_setRootVC);
+        NSLog(@"[TodayHook] setRootViewController 已挂载");
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);

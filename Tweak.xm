@@ -21,6 +21,10 @@ static const int kEpochDay = 18262;
 static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 static UIWindow *gAppWindow = nil;
+static UIViewController *gRealRoot = nil;
+static UIWindow *gRootHost = nil;
+static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
+
 static NSTimer *gGuard = nil;
 static NSTimer *gBeat = nil;
 static BOOL gInHook = NO;
@@ -623,9 +627,6 @@ static void LCShowLock(void) {
     NSLog(@"[TodayHook] 验证页已呈现 host=%@", NSStringFromClass([host class]));
 }
 
-static UIViewController *gRealRoot = nil;
-static UIWindow *gRootHost = nil;
-static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
 
 static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
     if (!orig_setRootVC) return;

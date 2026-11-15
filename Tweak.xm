@@ -608,6 +608,30 @@ static UIViewController *gHostVC = nil;
 static void LCHideAppUI(BOOL hide) { (void)hide; }
 
 // 把验证页挂进 App 的 RootViewController，并藏掉它原有内容
+
+// 启动时若已有有效卡密 → 后台静默校验一次，通过就直接解锁（避免重启后卡在输入页）
+static BOOL LCTryAutoUnlock(void) {
+    NSString *code = savedCode();
+    if (!code.length) return NO;
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    double exp = [d[@"e"] doubleValue];
+    if (exp > 0 && exp < [[NSDate date] timeIntervalSince1970]) {
+        NSLog(@"[TodayHook] 本地卡密已过期");
+        return NO;
+    }
+    // 先解锁，让界面可用，同时后台校验
+    dispatch_async(dispatch_get_main_queue(), ^{ LCUnlock(); });
+    [LCNet request:@"heartbeat" code:code done:^(BOOL reachable, BOOL ok, double e2, NSString *msg) {
+        if (!reachable) return;                 // 离线：保持已解锁
+        if (ok && e2 > 0) { saveLicense(code, e2); stampOnline(code); return; }
+        // 服务器说失效 → 重新上锁
+        clearLicense();
+        gUnlocked = NO;
+        NSLog(@"[TodayHook] 服务器判定失效：%@", msg);
+    }];
+    return YES;
+}
+
 static void LCEnsureLockIn(UIViewController *host) {
     if (!host || gUnlocked) return;
     gHostVC = host;
@@ -702,6 +726,10 @@ static void my_rvc_vdl(id self, SEL _cmd) {
 static void my_rvc_vda(id self, SEL _cmd, BOOL animated) {
     if (orig_rvc_vda) orig_rvc_vda(self, _cmd, animated);
     if (gUnlocked) return;
+    if (LCTryAutoUnlock()) {
+        NSLog(@"[TodayHook] 已有有效卡密，自动解锁");
+        return;
+    }
     LCEnsureLockIn((UIViewController *)self);
     LCStartGuard();
     NSLog(@"[TodayHook] RootViewController 出现，已挂锁");
@@ -709,6 +737,7 @@ static void my_rvc_vda(id self, SEL _cmd, BOOL animated) {
 
 static void LCAutoAttach(void) {
     if (gUnlocked) return;
+    if (LCTryAutoUnlock()) return;
     UIWindow *key = nil;
     for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
         if (w.isKeyWindow) { key = w; break; }

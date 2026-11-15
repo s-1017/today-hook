@@ -611,6 +611,9 @@ static void LCHideAppUI(BOOL hide) { (void)hide; }
 
 // 启动时若已有有效卡密 → 后台静默校验一次，通过就直接解锁（避免重启后卡在输入页）
 
+static void LCEnsureLockIn(UIViewController *host);
+static void LCStartGuard(void);
+
 // 本地到期自检：断网也生效，30 秒粒度
 static NSTimer *gExpTimer = nil;
 

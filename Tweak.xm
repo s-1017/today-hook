@@ -610,6 +610,37 @@ static void LCHideAppUI(BOOL hide) { (void)hide; }
 // 把验证页挂进 App 的 RootViewController，并藏掉它原有内容
 
 // 启动时若已有有效卡密 → 后台静默校验一次，通过就直接解锁（避免重启后卡在输入页）
+
+// 本地到期自检：断网也生效，30 秒粒度
+static NSTimer *gExpTimer = nil;
+
+static void LCStartExpiryWatch(void) {
+    if (gExpTimer) return;
+    gExpTimer = [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *t) {
+        if (!gUnlocked) return;
+        NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+        double exp = [d[@"e"] doubleValue];
+        if (exp <= 0) return;
+        if ([[NSDate date] timeIntervalSince1970] < exp) return;
+        NSLog(@"[TodayHook] 卡密已到期，锁定");
+        clearLicense();
+        gUnlocked = NO;
+        [t invalidate];
+        gExpTimer = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *host = gHostVC;
+            if (!host) {
+                for (UIWindow *w in [[UIApplication sharedApplication] windows])
+                    if (w.isKeyWindow && w.rootViewController) { host = w.rootViewController; break; }
+            }
+            if (host) {
+                LCEnsureLockIn(host);
+                LCStartGuard();
+            }
+        });
+    }];
+}
+
 static BOOL LCTryAutoUnlock(void) {
     NSString *code = savedCode();
     if (!code.length) return NO;
@@ -660,6 +691,7 @@ static void LCUnlock(void) {
     }
     [gLockVC.view removeFromSuperview];
     gLockVC = nil;
+    LCStartExpiryWatch();
     NSLog(@"[TodayHook] 已解锁");
 }
 

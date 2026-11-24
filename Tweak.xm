@@ -862,98 +862,77 @@ __attribute__((constructor)) static void todayhook_init(void) {
 }
 
 
-// 菜单换肤 v1：接管 WDMenuView 的 cell 绘制，功能零改动
+// ImGui 样式改造：运行时改 App 自己的 ImGuiStyle（阿联酋深色+黄）
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <mach-o/dyld.h>
 
-#define THEME_KEY @"_td_menu_tint"
-#define BG_KEY    @"_td_menu_bg"
+#define STYLE_GETSTYLE 0x5E3394ULL     // ImGui::GetStyle 文件偏移（从符号表取得）
+#define COLORS_OFF     0xBC            // ImGuiStyle.Colors 起始偏移（ImGui 1.89.2）
 
-static UIColor *TintColor(void) {
-    NSData *d = [[NSUserDefaults standardUserDefaults] objectForKey:THEME_KEY];
-    if (d) {
-        UIColor *c = [NSKeyedUnarchiver unarchivedObjectOfClass:[UIColor class] fromData:d error:nil];
-        if (c) return c;
+static float F(unsigned hex) { return (float)(hex & 0xFF) / 255.0f; }
+
+static void WriteColors(void *style) {
+    if (!style) return;
+    float *base = (float *)((char *)style + COLORS_OFF);
+    // 每个颜色 4 个 float
+    struct { int idx; float r, g, b, a; } table[] = {
+        {  0, 0.91f, 0.92f, 0.94f, 1.0f },   // Text        #E8EBF0
+        {  2, 0.102f, 0.114f, 0.141f, 1.0f }, // WindowBg    #1A1D24
+        {  3, 0.078f, 0.090f, 0.114f, 1.0f }, // ChildBg     #14171D
+        {  5, 0.227f, 0.247f, 0.290f, 1.0f }, // Border      #3A3F4A
+        {  7, 0.078f, 0.090f, 0.114f, 1.0f }, // FrameBg
+        { 18, 1.000f, 0.902f, 0.502f, 1.0f }, // CheckMark   #FFE680
+        { 19, 1.000f, 0.902f, 0.502f, 1.0f }, // SliderGrab
+        { 20, 1.000f, 0.835f, 0.310f, 1.0f }, // SliderGrabActive
+        { 21, 0.149f, 0.165f, 0.200f, 1.0f }, // Button      #262A33
+        { 22, 0.184f, 0.204f, 0.247f, 1.0f }, // ButtonHovered
+        { 24, 0.149f, 0.165f, 0.200f, 1.0f }, // Header
+        { 25, 0.184f, 0.204f, 0.247f, 1.0f }, // HeaderHovered
+    };
+    for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        float *c = base + table[i].idx * 4;
+        c[0] = table[i].r; c[1] = table[i].g; c[2] = table[i].b; c[3] = table[i].a;
     }
-    return [UIColor colorWithRed:1.0 green:0.90 blue:0.50 alpha:1.0];   // #FFE680
+    // 布局手感
+    float *f = (float *)style;
+    f[12 / 4] = 16.0f;   // WindowRounding (offset 12)
+    f[64 / 4] = 10.0f;   // FrameRounding  (offset 64)
+    f[56 / 4] = 12.0f;   // FramePadding.x (offset 56)
+    f[57 / 4] = 8.0f;    // FramePadding.y
+    f[72 / 4] = 10.0f;   // ItemSpacing.x
+    f[73 / 4] = 12.0f;   // ItemSpacing.y
+    NSLog(@"[style] 已写入阿联酋配色");
 }
 
-static UIColor *BgColor(void) {
-    return [UIColor colorWithRed:0.102 green:0.114 blue:0.141 alpha:1.0];  // #1A1D24
+typedef void *(*GetStyleFn)(void);
+
+static BOOL LooksLikeHeap(void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x100000000ULL && v < 0x7000000000ULL;   // 粗判，避免野指针
 }
 
-static void SaveTint(UIColor *c) {
-    if (!c) return;
-    NSData *d = [NSKeyedArchiver archivedDataWithRootObject:c
-                                      requiringSecureCoding:NO error:nil];
-    [[NSUserDefaults standardUserDefaults] setObject:d forKey:THEME_KEY];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-
-// 递归给控件上色
-static void SkinView(UIView *v) {
-    if (!v) return;
-    UIColor *tint = TintColor();
-    if ([v isKindOfClass:[UISwitch class]]) {
-        UISwitch *s = (UISwitch *)v;
-        s.onTintColor = tint;
-    } else if ([v isKindOfClass:[UISlider class]]) {
-        UISlider *sl = (UISlider *)v;
-        sl.minimumTrackTintColor = tint;
-        sl.maximumTrackTintColor = [UIColor colorWithWhite:0.22 alpha:1];
-        sl.thumbTintColor = tint;
-    } else if ([v isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)v;
-        if (l.font.pointSize >= 15) l.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-        else l.textColor = [UIColor colorWithWhite:0.62 alpha:1];
-    } else if ([v isKindOfClass:[UIImageView class]]) {
-        ((UIImageView *)v).tintColor = tint;
-    } else if ([v isKindOfClass:[UITableView class]]) {
-        UITableView *tv = (UITableView *)v;
-        tv.backgroundColor = BgColor();
-        tv.separatorColor = [UIColor colorWithWhite:0.18 alpha:1];
-    } else if ([v isKindOfClass:[UITableViewCell class]]) {
-        UITableViewCell *c = (UITableViewCell *)v;
-        c.backgroundColor = [UIColor colorWithRed:0.078 green:0.090 blue:0.114 alpha:1];
-        c.contentView.backgroundColor = c.backgroundColor;
-        c.layer.cornerRadius = 14;
-        c.layer.masksToBounds = YES;
-        c.layer.borderWidth = 1;
-        c.layer.borderColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
-        c.selectionStyle = UITableViewCellSelectionStyleNone;
+static void ApplyOnce(void) {
+    static BOOL done = NO;
+    if (done) return;
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    if (!slide) return;
+    GetStyleFn fn = (GetStyleFn)(slide + STYLE_GETSTYLE);
+    void *style = fn();
+    if (!LooksLikeHeap(style)) {
+        NSLog(@"[style] 取不到 style 指针，跳过");
+        return;
     }
-    for (UIView *s in v.subviews) SkinView(s);
+    WriteColors(style);
+    done = YES;
 }
 
-// hook cellForRowAtIndexPath（如果 WDMenuView 实现了它）
-static id (*orig_cellForRow)(id, SEL, UITableView *, NSIndexPath *) = NULL;
-
-static id my_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    UITableViewCell *cell = orig_cellForRow ? orig_cellForRow(self, _cmd, tv, ip) : nil;
-    tv.backgroundColor = BgColor();
-    tv.separatorStyle = UITableViewCellSeparatorStyleNone;
-    if (cell) {
-        SkinView(cell);
-        CGRect f = cell.frame;
-        cell.frame = f;
-    }
-    return cell;
-}
-
-__attribute__((constructor)) static void skin_init(void) {
-    Class m = objc_getClass("WDMenuView");
-    if (!m) { NSLog(@"[skin] 没有 WDMenuView"); return; }
-    SEL sel = @selector(tableView:cellForRowAtIndexPath:);
-    Method mm = class_getInstanceMethod(m, sel);
-    if (mm) {
-        orig_cellForRow = (id (*)(id, SEL, UITableView *, NSIndexPath *))method_getImplementation(mm);
-        if (!class_addMethod(m, sel, (IMP)my_cellForRow, method_getTypeEncoding(mm))) {
-            method_setImplementation(mm, (IMP)my_cellForRow);
-        }
-        NSLog(@"[skin] cell 钩子已挂载");
-    } else {
-        NSLog(@"[skin] WDMenuView 未实现 cellForRow");
+__attribute__((constructor)) static void style_init(void) {
+    NSLog(@"[style] 加载");
+    // 延迟轮询：等 ImGui 上下文创建后再写
+    for (int i = 0; i < 40; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((1.0 + i * 0.5) * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ ApplyOnce(); });
     }
 }
 

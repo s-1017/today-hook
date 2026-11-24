@@ -1,4 +1,4 @@
-﻿// Tweak.xm —— Today 自有授权层 v7（在线校验 + 离线兜底 + 远程作废）
+// Tweak.xm —— Today 自有授权层 v7（在线校验 + 离线兜底 + 远程作废）
 //
 // 流程：
 //   启动/验证 → 请求 https://服务器/api/v1/activate?code=&device=
@@ -744,8 +744,23 @@ static void LCStartGuard(void) {
     }];
 }
 
+static BOOL LCHasValidLicense(void) {
+    NSString *c = savedCode();
+    if (!c.length) return NO;
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    double exp = [d[@"e"] doubleValue];
+    if (exp <= 0) return NO;
+    if (exp < [[NSDate date] timeIntervalSince1970]) return NO;
+    return YES;
+}
+
 static void LCShowLock(void) {
     if (gUnlocked) return;
+    if (LCHasValidLicense()) {        // 有有效卡密 → 直接放行，不显示加载页
+        NSLog(@"[T] 本地卡密有效，跳过验证页");
+        dispatch_async(dispatch_get_main_queue(), ^{ LCUnlock(); });
+        return;
+    }
     if (gHostVC) LCEnsureLockIn(gHostVC);
 }
 
@@ -860,289 +875,3 @@ __attribute__((constructor)) static void todayhook_init(void) {
     });
     
 }
-
-
-// 自绘阿联酋风格菜单（骨架版：外观 100% 我们控制）
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#import <objc/runtime.h>
-
-static UIWindow *gMenuWin = nil;
-static BOOL gVisible = NO;
-
-#define C_BG    [UIColor colorWithRed:0.102 green:0.114 blue:0.141 alpha:0.97]
-#define C_CARD  [UIColor colorWithRed:0.078 green:0.090 blue:0.114 alpha:1.0]
-#define C_EDGE  [UIColor colorWithRed:0.227 green:0.247 blue:0.290 alpha:1.0]
-#define C_INK   [UIColor colorWithRed:0.910 green:0.922 blue:0.941 alpha:1.0]
-#define C_GRAY  [UIColor colorWithRed:0.540 green:0.565 blue:0.620 alpha:1.0]
-#define C_ACC   [UIColor colorWithRed:1.0 green:0.902 blue:0.502 alpha:1.0]
-
-#pragma mark - 通用控件
-
-@interface TDItem : NSObject
-@property (nonatomic, copy) NSString *title;
-@property (nonatomic, assign) NSInteger kind;   // 0=开关 1=滑块 2=下拉
-@property (nonatomic, assign) BOOL on;
-@property (nonatomic, assign) float value, minV, maxV;
-@property (nonatomic, copy) NSString *choice;
-@property (nonatomic, copy) void (^changed)(id);
-@end
-@implementation TDItem
-@end
-
-static UILabel *MakeLabel(CGRect f, NSString *t, CGFloat size, UIColor *c, BOOL bold) {
-    UILabel *l = [[UILabel alloc] initWithFrame:f];
-    l.text = t;
-    l.textColor = c;
-    l.font = bold ? [UIFont boldSystemFontOfSize:size] : [UIFont systemFontOfSize:size];
-    l.backgroundColor = [UIColor clearColor];
-    return l;
-}
-
-@interface TDRowView : UIView
-@property (nonatomic, strong) TDItem *item;
-@property (nonatomic, strong) UISwitch *sw;
-@property (nonatomic, strong) UISlider *sl;
-@property (nonatomic, strong) UILabel *valLab;
-@property (nonatomic, strong) UILabel *title;
-@end
-
-@implementation TDRowView
-- (instancetype)initWithItem:(TDItem *)it width:(CGFloat)w {
-    if ((self = [super initWithFrame:CGRectMake(0, 0, w, it.kind == 1 ? 76 : 58)])) {
-        _item = it;
-        self.backgroundColor = [UIColor clearColor];
-        _title = MakeLabel(CGRectMake(18, it.kind == 1 ? 12 : 16, w - 120, 24), it.title, 16, C_INK, NO);
-        [self addSubview:_title];
-        if (it.kind == 0) {
-            _sw = [[UISwitch alloc] initWithFrame:CGRectMake(w - 74, 13, 51, 31)];
-            _sw.onTintColor = C_ACC;
-            _sw.on = it.on;
-            [_sw addTarget:self action:@selector(onSwitch) forControlEvents:UIControlEventValueChanged];
-            [self addSubview:_sw];
-        } else if (it.kind == 1) {
-            _valLab = MakeLabel(CGRectMake(w - 96, 10, 78, 20), [NSString stringWithFormat:@"%.2f", it.value], 14, C_ACC, NO);
-            _valLab.textAlignment = NSTextAlignmentRight;
-            [self addSubview:_valLab];
-            _sl = [[UISlider alloc] initWithFrame:CGRectMake(18, 44, w - 44, 26)];
-            _sl.minimumValue = it.minV; _sl.maximumValue = it.maxV; _sl.value = it.value;
-            _sl.minimumTrackTintColor = C_ACC;
-            _sl.maximumTrackTintColor = [UIColor colorWithWhite:0.20 alpha:1];
-            _sl.thumbTintColor = C_ACC;
-            [_sl addTarget:self action:@selector(onSlide) forControlEvents:UIControlEventValueChanged];
-            [self addSubview:_sl];
-        } else {
-            UILabel *dl = MakeLabel(CGRectMake(w - 140, 16, 120, 24),
-                                    [NSString stringWithFormat:@"%@ ▾", it.choice], 14, C_INK, NO);
-            dl.textAlignment = NSTextAlignmentRight;
-            [self addSubview:dl];
-        }
-    }
-    return self;
-}
-- (void)onSwitch { _item.on = _sw.on; if (_item.changed) _item.changed(@(_sw.on)); }
-- (void)onSlide  { _item.value = _sl.value; _valLab.text = [NSString stringWithFormat:@"%.2f", _sl.value];
-                   if (_item.changed) _item.changed(@(_sl.value)); }
-@end
-
-#pragma mark - 菜单主界面
-
-@interface TDMenuVC : UIViewController
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSArray<TDItem *> *> *data;
-@property (nonatomic, strong) NSString *cur;
-@property (nonatomic, strong) UIScrollView *scroll;
-@property (nonatomic, strong) NSMutableArray<UIButton *> *tabBtns;
-@property (nonatomic, strong) UIColor *accent;
-@end
-
-@implementation TDMenuVC
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor clearColor];
-    _accent = C_ACC;
-    _tabBtns = [NSMutableArray array];
-    [self buildData];
-
-    CGRect b = [UIScreen mainScreen].bounds;
-    CGFloat w = MIN(b.size.width - 80, 720), h = MIN(b.size.height - 120, 560);
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((b.size.width - w) / 2, (b.size.height - h) / 2 - 40, w, h)];
-    panel.backgroundColor = C_BG;
-    panel.layer.cornerRadius = 20;
-    panel.layer.borderWidth = 1;
-    panel.layer.borderColor = C_EDGE.CGColor;
-    panel.layer.shadowColor = [UIColor blackColor].CGColor;
-    panel.layer.shadowOpacity = 0.5;
-    panel.layer.shadowRadius = 24;
-    panel.layer.shadowOffset = CGSizeMake(0, 10);
-    [self.view addSubview:panel];
-
-    UILabel *title = MakeLabel(CGRectMake(24, 22, 200, 32), @"Today", 26, _accent, YES);
-    [panel addSubview:title];
-    [panel addSubview:MakeLabel(CGRectMake(120, 30, 100, 20), @"内部版", 14, C_GRAY, NO)];
-
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(w - 56, 20, 36, 36);
-    close.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1];
-    close.layer.cornerRadius = 18;
-    [close setTitle:@"✕" forState:UIControlStateNormal];
-    [close setTitleColor:C_GRAY forState:UIControlStateNormal];
-    [close addTarget:self action:@selector(hideMenu) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:close];
-
-    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(20, 64, w - 40, 1)];
-    line.backgroundColor = C_EDGE;
-    [panel addSubview:line];
-
-    // 左侧分类
-    CGFloat tabW = 96, ty = 80;
-    NSArray *order = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    for (NSString *name in order) {
-        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-        btn.frame = CGRectMake(14, ty, tabW, 92);
-        btn.backgroundColor = [UIColor colorWithWhite:0.13 alpha:1];
-        btn.layer.cornerRadius = 14;
-        [btn setTitle:name forState:UIControlStateNormal];
-        [btn setTitleColor:C_INK forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-        btn.tag = [_tabBtns count];
-        [btn addTarget:self action:@selector(tabTap:) forControlEvents:UIControlEventTouchUpInside];
-        [panel addSubview:btn];
-        [_tabBtns addObject:btn];
-        ty += 100;
-    }
-
-    UIView *vline = [[UIView alloc] initWithFrame:CGRectMake(122, 76, 1, h - 100)];
-    vline.backgroundColor = C_EDGE;
-    [panel addSubview:vline];
-
-    _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(134, 76, w - 150, h - 96)];
-    _scroll.showsVerticalScrollIndicator = NO;
-    [panel addSubview:_scroll];
-
-    [self selectTab:@"视觉"];
-}
-
-- (void)buildData {
-    _data = [NSMutableDictionary dictionary];
-    NSMutableArray *vis = [NSMutableArray array];
-    for (NSString *t in @[@"显示方框", @"显示骨骼", @"显示射线", @"显示血量", @"显示名字", @"显示距离", @"显示护甲", @"显示手持", @"雷达", @"雷达大小"]) {
-        TDItem *i = [TDItem new]; i.title = t; i.kind = 0; i.on = NO; [vis addObject:i];
-    }
-    _data[@"视觉"] = vis;
-
-    NSMutableArray *aim = [NSMutableArray array];
-    { TDItem *i = [TDItem new]; i.title = @"启用自瞄"; i.kind = 0; i.on = NO; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"瞄准速度"; i.kind = 1; i.value = 0.8; i.minV = 0; i.maxV = 2; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"瞄准范围"; i.kind = 1; i.value = 50; i.minV = 1; i.maxV = 360; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"平滑"; i.kind = 1; i.value = 35; i.minV = 0; i.maxV = 100; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"瞄准部位"; i.kind = 2; i.choice = @"头部"; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"单枪模式"; i.kind = 0; i.on = NO; [aim addObject:i]; }
-    { TDItem *i = [TDItem new]; i.title = @"单枪延迟"; i.kind = 1; i.value = 120; i.minV = 0; i.maxV = 500; [aim addObject:i]; }
-    _data[@"自瞄"] = aim;
-
-    NSMutableArray *wep = [NSMutableArray array];
-    for (NSString *t in @[@"步枪", @"冲锋枪", @"狙击枪", @"霰弹枪", @"手枪", @"机枪", @"近战", @"投掷物"]) {
-        TDItem *i = [TDItem new]; i.title = t; i.kind = 0; i.on = NO; [wep addObject:i];
-    }
-    { TDItem *i = [TDItem new]; i.title = @"压枪强度"; i.kind = 1; i.value = 0.6; i.minV = 0; i.maxV = 1; [wep addObject:i]; }
-    _data[@"枪械"] = wep;
-
-    NSMutableArray *sys = [NSMutableArray array];
-    for (NSString *t in @[@"锁定菜单", @"公告弹窗", @"到期时间弹窗", @"显示剩余天数"]) {
-        TDItem *i = [TDItem new]; i.title = t; i.kind = 0; i.on = NO; [sys addObject:i];
-    }
-    _data[@"设置"] = sys;
-}
-
-- (void)tabTap:(UIButton *)b {
-    NSArray *order = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    [self selectTab:order[b.tag]];
-}
-
-- (void)selectTab:(NSString *)name {
-    _cur = name;
-    NSArray *order = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    for (NSUInteger i = 0; i < _tabBtns.count; i++) {
-        BOOL on = [order[i] isEqualToString:name];
-        UIButton *b = _tabBtns[i];
-        b.backgroundColor = on ? [UIColor colorWithRed:0.16 green:0.18 blue:0.22 alpha:1]
-                               : [UIColor colorWithWhite:0.11 alpha:1];
-        b.layer.borderWidth = on ? 1 : 0;
-        b.layer.borderColor = C_ACC.CGColor;
-        [b setTitleColor:on ? C_ACC : C_INK forState:UIControlStateNormal];
-    }
-    for (UIView *v in _scroll.subviews) [v removeFromSuperview];
-    CGFloat y = 0, w = _scroll.bounds.size.width;
-    for (TDItem *it in _data[name]) {
-        TDRowView *row = [[TDRowView alloc] initWithItem:it width:w - 8];
-        row.frame = CGRectMake(0, y, w - 8, row.frame.size.height);
-        UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, y, w - 8, row.frame.size.height)];
-        card.backgroundColor = C_CARD;
-        card.layer.cornerRadius = 12;
-        card.layer.borderWidth = 1;
-        card.layer.borderColor = C_EDGE.CGColor;
-        [card addSubview:row];
-        row.frame = card.bounds;
-        [_scroll addSubview:card];
-        y += card.frame.size.height + 10;
-    }
-    _scroll.contentSize = CGSizeMake(w, y);
-}
-
-- (void)hideMenu {
-    gVisible = NO;
-    gMenuWin.hidden = YES;
-}
-
-@end
-
-#pragma mark - 窗口
-
-static void ShowMenu(void) {
-    if (!gMenuWin) {
-        UIWindow *w = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]]) {
-                    w = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)sc];
-                    break;
-                }
-            }
-        }
-        if (!w) w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        w.windowLevel = UIWindowLevelAlert + 500;
-        w.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-        w.rootViewController = [[TDMenuVC alloc] init];
-        gMenuWin = w;
-    }
-    gMenuWin.hidden = NO;
-    gVisible = YES;
-}
-
-// 三指双击唤出
-static void (*orig_showMenu)(id, SEL) = NULL;
-static void my_showMenu(id self, SEL _cmd) {
-    ShowMenu();
-}
-
-__attribute__((constructor)) static void tdmenu_init(void) {
-    NSLog(@"[tdmenu] 加载");
-    // 诊断用：8 秒后自动弹出，验证我们的窗口能否盖在游戏上
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ ShowMenu(); });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        Class m = objc_getClass("WDMenuView");
-        if (m) {
-            SEL s = @selector(showMenu);
-            Method mm = class_getInstanceMethod(m, s);
-            if (mm) {
-                orig_showMenu = (void (*)(id, SEL))method_getImplementation(mm);
-                method_setImplementation(mm, (IMP)my_showMenu);
-                NSLog(@"[tdmenu] 已接管 showMenu");
-            }
-        }
-    });
-}
-

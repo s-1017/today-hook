@@ -1,109 +1,959 @@
-// 菜单探针：dump WDMenuView / WDRow 的真实运行时结构
+﻿// Tweak.xm —— Today 自有授权层 v7（在线校验 + 离线兜底 + 远程作废）
+//
+// 流程：
+//   启动/验证 → 请求 https://服务器/api/v1/activate?code=&device=
+//     · 服务器可达且 ok      → 用服务器返回的到期时间放行
+//     · 服务器可达但被拒      → 显示服务器原因（已作废/已过期/不存在），不放行
+//     · 服务器不可达          → 离线兜底：本地 HMAC 校验（有效则放行，记录"离线"）
+//   运行中每 30 分钟心跳；服务器说失效 → 立刻清本地并重新锁屏
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <CommonCrypto/CommonHMAC.h>
+#import <objc/runtime.h>
+#import <Security/Security.h>
+#include <sys/sysctl.h>
+#include <mach-o/dyld.h>
+
+static double LCVerifyToken(NSString *token, NSString *code);
+
+#include <unistd.h>
+
+static NSString *const kStoreKey = @"_today_lic_v1";
+static NSString *const kDevKey = @"_today_dev_id";
+static NSString *const kAPIBase = @"https://134.175.44.168/api/v1";
+static const int kEpochDay = 18262;
+
+static UIWindow *gAppWindow = nil;
+static UIViewController *gRealRoot = nil;
+static UIWindow *gRootHost = nil;
+static void (*orig_setRootVC)(id, SEL, UIViewController *) = NULL;
+
+static NSTimer *gGuard = nil;
+static NSTimer *gBeat = nil;
+static BOOL gInHook = NO;
+static BOOL gUnlocked = NO;
+@class TMPanelCtrl;
+static TMPanelCtrl *gLockVC = nil;
+static UIWindow *gLockWin = nil;
+
+#define LC_BLUE [UIColor colorWithRed:0.18 green:0.48 blue:0.96 alpha:1.0]
+#define LC_BG   [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0]
+#define LC_CARD [UIColor colorWithRed:0.055 green:0.067 blue:0.090 alpha:1.0]
+#define LC_BORD [UIColor colorWithRed:0.129 green:0.161 blue:0.212 alpha:1.0]
+#define LC_FIELD [UIColor colorWithRed:0.051 green:0.067 blue:0.090 alpha:1.0]
+
+#pragma mark - Base32 / HMAC（离线兜底）
+
+
+
+
+
+// 返回天数（>0 有效）；-1 格式/签名错误
+
+
+#pragma mark - 本地存储
+
+static void saveLicenseEx(NSString *code, double expireTs, double activatedTs);
+
+static void saveLicense(NSString *code, double expireTs) {
+    saveLicenseEx(code, expireTs, [[NSDate date] timeIntervalSince1970]);
+}
+
+static void saveLicenseEx(NSString *code, double expireTs, double activatedTs) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u setObject:@{@"c": code ?: @"", @"e": @(expireTs), @"a": @(activatedTs),
+                   @"t": @([[NSDate date] timeIntervalSince1970])} forKey:kStoreKey];
+    [u synchronize];
+}
+
+static NSString *savedCode(void) {
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    if (![d isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *c = d[@"c"];
+    return [c isKindOfClass:[NSString class]] ? c : nil;
+}
+
+static void clearLicense(void) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u removeObjectForKey:kStoreKey];
+    [u synchronize];
+}
+
+// ---- Keychain 读写（重装 App 不丢设备 ID）----
+static NSString *kcGet(void) {
+    NSDictionary *q = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                        (__bridge id)kSecAttrService: @"com.today.internal.lic",
+                        (__bridge id)kSecAttrAccount: @"devid",
+                        (__bridge id)kSecReturnData: @YES,
+                        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne};
+    CFTypeRef r = NULL;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &r) == errSecSuccess && r) {
+        NSData *d = (__bridge_transfer NSData *)r;
+        NSString *v = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if ([v isKindOfClass:[NSString class]] && v.length >= 6) return v;
+    }
+    return nil;
+}
+
+static BOOL kcSet(NSString *v) {
+    NSDictionary *base = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                           (__bridge id)kSecAttrService: @"com.today.internal.lic",
+                           (__bridge id)kSecAttrAccount: @"devid"};
+    SecItemDelete((__bridge CFDictionaryRef)base);
+    NSMutableDictionary *add = [base mutableCopy];
+    add[(__bridge id)kSecValueData] = [v dataUsingEncoding:NSUTF8StringEncoding];
+    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+    return SecItemAdd((__bridge CFDictionaryRef)add, NULL) == errSecSuccess;
+}
+
+static NSString *deviceId(void);
+
+static void stampOnline(NSString *code) {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    NSDictionary *old = [u objectForKey:kStoreKey];
+    if ([old isKindOfClass:[NSDictionary class]]) [d addEntriesFromDictionary:old];
+    d[@"o"] = @([[NSDate date] timeIntervalSince1970]);
+    d[@"dv"] = deviceId();
+    d[@"c"] = code ?: @"";
+    [u setObject:d forKey:kStoreKey];
+    [u synchronize];
+}
+
+// 离线放行必须：同一设备 + 同一卡密 + 24 小时内联网成功过
+static BOOL offlineAllowed(NSString *code) {
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    if (![d isKindOfClass:[NSDictionary class]]) return NO;
+    NSString *c = d[@"c"], *dv = d[@"dv"];
+    if (![c isKindOfClass:[NSString class]] || ![c isEqualToString:code]) return NO;
+    if (![dv isKindOfClass:[NSString class]] || ![dv isEqualToString:deviceId()]) return NO;
+    double o = [d[@"o"] doubleValue];
+    if (o <= 0) return NO;
+    return ([[NSDate date] timeIntervalSince1970] - o) < 24 * 3600;
+}
+
+static NSString *deviceId(void) {
+    NSString *v = kcGet();
+    if (v.length) return v;
+
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSString *d = [u objectForKey:kDevKey];
+    if (![d isKindOfClass:[NSString class]] || d.length < 6) {
+        d = [[NSUUID UUID] UUIDString];
+        [u setObject:d forKey:kDevKey];
+        [u synchronize];
+    }
+    if (!kcSet(d)) 
+    return d;
+}
+
+static NSString *fmtTime(double ts) {
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+}
+
+#pragma mark - 网络（自签证书放行）
+
+@interface LCNet : NSObject <NSURLSessionDelegate>
++ (void)request:(NSString *)path
+           code:(NSString *)code
+           done:(void (^)(BOOL reachable, BOOL ok, double exp, NSString *msg))done;
+@end
+
+@implementation LCNet
++ (void)URLSession:(NSURLSession *)s didReceiveChallenge:(NSURLAuthenticationChallenge *)ch
+ completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))c {
+    if ([ch.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        c(NSURLSessionAuthChallengeUseCredential,
+          [NSURLCredential credentialForTrust:ch.protectionSpace.serverTrust]);
+    } else {
+        c(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    }
+}
+
++ (void)request:(NSString *)path
+           code:(NSString *)code
+           done:(void (^)(BOOL, BOOL, double, NSString *))done {
+    NSString *urlStr = [NSString stringWithFormat:@"%@/%@?code=%@&device=%@",
+                        kAPIBase, path,
+                        [code stringByAddingPercentEncodingWithAllowedCharacters:
+                         [NSCharacterSet URLQueryAllowedCharacterSet]],
+                        [deviceId() stringByAddingPercentEncodingWithAllowedCharacters:
+                         [NSCharacterSet URLQueryAllowedCharacterSet]]];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) { done(NO, NO, 0, @"URL 构造失败"); return; }
+
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 6;
+    cfg.timeoutIntervalForResource = 8;
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg delegate:(id<NSURLSessionDelegate>)self
+                                                  delegateQueue:nil];
+    [[sess dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (err || !data.length) { done(NO, NO, 0, @"网络不可达"); return; }
+            NSDictionary *j = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (![j isKindOfClass:[NSDictionary class]]) { done(YES, NO, 0, @"服务器响应异常"); return; }
+            BOOL ok = [j[@"ok"] boolValue];
+            double exp = [j[@"expire_at"] doubleValue];
+            NSString *msg = [j[@"msg"] isKindOfClass:[NSString class]] ? j[@"msg"] : @"";
+            done(YES, ok, exp, msg);
+        });
+    }] resume];
+    [sess finishTasksAndInvalidate];
+}
+@end
+
+#pragma mark - 激活界面
+
+static void LCUnlock(void);
+static void LCForceLock(NSString *reason);
+
+@interface TMPanelCtrl : UIViewController <UITextFieldDelegate>
+@property (nonatomic, strong) UITextField *field;
+@property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UIButton *btn;
+@property (nonatomic, strong) UIView *card;
+@end
+
+@implementation TMPanelCtrl
+
+- (void)loadView {
+    UIView *v = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    v.backgroundColor = [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0];
+    self.view = v;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = LC_BG;
+
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat h = self.view.bounds.size.height;
+
+    CGFloat iconS = 82;
+    UIView *icon = [[UIView alloc] initWithFrame:CGRectMake((w - iconS) / 2, h * 0.085, iconS, iconS)];
+    icon.backgroundColor = LC_BLUE;
+    icon.layer.cornerRadius = 19;
+    icon.layer.shadowColor = LC_BLUE.CGColor;
+    icon.layer.shadowOpacity = 0.55;
+    icon.layer.shadowRadius = 18;
+    icon.layer.shadowOffset = CGSizeZero;
+    [self.view addSubview:icon];
+    UILabel *ic = [[UILabel alloc] initWithFrame:icon.bounds];
+    ic.text = @"T";
+    ic.textColor = [UIColor whiteColor];
+    ic.font = [UIFont boldSystemFontOfSize:46];
+    ic.textAlignment = NSTextAlignmentCenter;
+    [icon addSubview:ic];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, icon.frame.origin.y + iconS + 16, w, 42)];
+    title.text = @"Today内部版";
+    title.textColor = [UIColor whiteColor];
+    title.font = [UIFont boldSystemFontOfSize:32];
+    title.textAlignment = NSTextAlignmentCenter;
+    [self.view addSubview:title];
+
+    CGFloat cardW = w - 56, cardH = 208, cardY = h * 0.455;
+    _card = [[UIView alloc] initWithFrame:CGRectMake(28, cardY, cardW, cardH)];
+    _card.backgroundColor = LC_CARD;
+    _card.layer.cornerRadius = 16;
+    _card.layer.borderWidth = 1;
+    _card.layer.borderColor = LC_BORD.CGColor;
+    [self.view addSubview:_card];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 16, cardW - 36, 18)];
+    lab.text = @"卡密激活";
+    lab.textColor = LC_BLUE;
+    lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    [_card addSubview:lab];
+
+    _field = [[UITextField alloc] initWithFrame:CGRectMake(10, 40, cardW - 20, 54)];
+    _field.backgroundColor = LC_FIELD;
+    _field.layer.cornerRadius = 10;
+    _field.layer.borderWidth = 1;
+    _field.layer.borderColor = LC_BORD.CGColor;
+    _field.textColor = [UIColor whiteColor];
+    _field.tintColor = LC_BLUE;
+    _field.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
+    _field.placeholder = @"请输入卡密";
+    _field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+    _field.autocorrectionType = UITextAutocorrectionTypeNo;
+    _field.returnKeyType = UIReturnKeyDone;
+    _field.delegate = self;
+    _field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 14, 1)];
+    _field.leftViewMode = UITextFieldViewModeAlways;
+    [_card addSubview:_field];
+
+    // 恢复上次输入（未验证也不会丢）
+    NSString *typed = [[NSUserDefaults standardUserDefaults] objectForKey:@"_today_typed"];
+    NSString *saved = savedCode();
+    if (typed.length) _field.text = typed;
+    else if (saved.length) _field.text = saved;
+    [_field addTarget:self action:@selector(onEdit)
+     forControlEvents:UIControlEventEditingChanged];
+
+    _btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    _btn.frame = CGRectMake(10, 108, cardW - 20, 54);
+    _btn.backgroundColor = LC_BLUE;
+    _btn.layer.cornerRadius = 12;
+    [_btn setTitle:@"验 证 激 活" forState:UIControlStateNormal];
+    [_btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _btn.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [_btn addTarget:self action:@selector(doVerify) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_btn];
+
+    _status = [[UILabel alloc] initWithFrame:CGRectMake(16, 172, cardW - 32, 22)];
+    _status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    _status.font = [UIFont systemFontOfSize:12];
+    _status.textAlignment = NSTextAlignmentCenter;
+    _status.text = saved.length ? @"已加载卡密，请登录" : @"";
+    [_card addSubview:_status];
+
+    // 左下角：自助解绑
+    UIButton *unbind = [UIButton buttonWithType:UIButtonTypeSystem];
+    unbind.frame = CGRectMake(18, h - 118, 120, 34);
+    [unbind setTitle:@"解 绑 设 备" forState:UIControlStateNormal];
+    [unbind setTitleColor:[UIColor colorWithRed:0.95 green:0.62 blue:0.24 alpha:1]
+                 forState:UIControlStateNormal];
+    unbind.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    unbind.layer.borderWidth = 1;
+    unbind.layer.borderColor = [UIColor colorWithRed:0.42 green:0.28 blue:0.10 alpha:1].CGColor;
+    unbind.layer.cornerRadius = 17;
+    [unbind addTarget:self action:@selector(doUnbind) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:unbind];
+
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    clear.frame = CGRectMake(0, h - 92, w, 40);
+    [clear setTitle:@"清除已保存的卡密" forState:UIControlStateNormal];
+    [clear setTitleColor:[UIColor colorWithWhite:0.40 alpha:1] forState:UIControlStateNormal];
+    clear.titleLabel.font = [UIFont systemFontOfSize:12];
+    [clear addTarget:self action:@selector(doClear) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:clear];
+}
+
+- (void)doUnbind {
+    NSString *code = [[_field.text stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
+    if (code.length < 8) {
+        code = savedCode() ?: @"";
+    }
+    if (!code.length) {
+        _status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        _status.text = @"请先输入卡密再解绑";
+        return;
+    }
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"解绑设备"
+                          message:@"解绑后本设备将失去授权，且扣除 6 小时时长。\n确定解绑？"
+                   preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"确定解绑" style:UIAlertActionStyleDestructive
+                                       handler:^(UIAlertAction *a) {
+        self.status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        self.status.text = @"正在解绑…";
+        [LCNet request:@"unbind" code:code done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
+            if (!reachable) {
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+                self.status.text = @"网络不可用，解绑失败";
+                return;
+            }
+            if (ok) {
+                BOOL nothing = [msg rangeOfString:@"无需解绑"].location != NSNotFound;
+                if (!nothing) {
+                    clearLicense();
+                    self.field.text = @"";
+                }
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
+                self.status.text = msg.length ? msg : @"已解绑，请重新激活";
+            } else {
+                self.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+                self.status.text = msg.length ? msg : @"解绑失败";
+            }
+        }];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)onEdit {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    [u setObject:(self.field.text ?: @"") forKey:@"_today_typed"];
+    [u synchronize];
+}
+
+- (void)doClear {
+    clearLicense();
+    _field.text = @"";
+    _status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    _status.text = @"已清除本地卡密";
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)tf {
+    [tf resignFirstResponder];
+    [self doVerify];
+    return YES;
+}
+
+- (void)doVerify {
+    [_field resignFirstResponder];
+    NSString *code = [[_field.text stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
+    if (!code.length) {
+        _status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        _status.text = @"请先输入卡密";
+        return;
+    }
+    _btn.enabled = NO;
+    [_btn setTitle:@"验 证 中…" forState:UIControlStateNormal];
+    _status.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    _status.text = @"正在联网验证…";
+
+    [LCNet request:@"activate" code:code done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
+        self->_btn.enabled = YES;
+        [self->_btn setTitle:@"验 证 激 活" forState:UIControlStateNormal];
+
+        if (reachable && ok && exp > 0) {
+            saveLicense(code, exp);
+            stampOnline(code);
+            NSString *msgStr = [msg isKindOfClass:[NSString class]] ? msg : @"";
+            if (msgStr.length && [msgStr rangeOfString:@"|"].location != NSNotFound) {
+                [[NSUserDefaults standardUserDefaults] setObject:msgStr forKey:@"_today_token"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            }
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"_today_typed"];
+            self->_status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
+            self->_status.text = [NSString stringWithFormat:@"验证通过 · 有效期至 %@", fmtTime(exp)];
+            [self->_btn setTitle:@"进 入 中…" forState:UIControlStateNormal];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ LCUnlock(); });
+            return;
+        }
+        if (reachable && !ok) {
+            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+            self->_status.text = msg.length ? msg : @"验证失败";
+            return;
+        }
+        // 网络不可达 → 离线兜底（必须本机联网验证过且在 24h 内）
+        // 离线：只认服务端签发的令牌（无本地密钥，无法伪造）
+        NSString *savedTok = [[NSUserDefaults standardUserDefaults] objectForKey:@"_today_token"];
+        double tokExp = LCVerifyToken(savedTok, code);
+        if (tokExp > [[NSDate date] timeIntervalSince1970]) {
+            saveLicense(code, tokExp);
+            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
+            self->_status.text = [NSString stringWithFormat:@"离线验证通过 · 有效期至 %@", fmtTime(tokExp)];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ LCUnlock(); });
+            return;
+        }
+        self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        self->_status.text = @"需要联网验证（离线令牌无效或已过期）";
+    }];
+}
+
+@end
+
+#pragma mark - 锁定控制
+
+static void LCHideAppUI(BOOL hide);
+
+static void LCShowLock(void);
+
+static void LCStartBeat(void) {
+    if (gBeat) [gBeat invalidate];
+    gBeat = [NSTimer scheduledTimerWithTimeInterval:1800 repeats:YES block:^(NSTimer *t) {
+        NSString *c = savedCode();
+        if (!c.length) return;
+        [LCNet request:@"heartbeat" code:c done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
+            if (!reachable) return;                 // 离线：放行，等下次
+            if (ok && exp > 0) { saveLicense(c, exp); stampOnline(c); return; }
+            
+            clearLicense();
+            LCForceLock(msg.length ? msg : @"授权已失效");
+        }];
+    }];
+}
+
+
+
+
+
+static void LCForceLock(NSString *reason) {
+    gUnlocked = NO;
+    if (gBeat) { [gBeat invalidate]; gBeat = nil; }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gLockWin) LCShowLock();
+        if (gLockVC) {
+            gLockVC.status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+            gLockVC.status.text = reason;
+            gLockVC.field.text = @"";
+        }
+    });
+}
+
+
+
+
+
+
+
+static void LCStartGuard(void);
+static void LCGuardTick(void);
+
+
+
+// App 每次设置根控制器时都被我们截住
+
+
+static void LCHideAppUI(BOOL hide);
+static void LCStartGuard(void);
+static void LCGuardTick(void);
+static void LCShowLock(void);
+
+
+
+
+
+
+
+
+
+
+
+
+static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
+    if (!orig_setRootVC) return;
+    if (gUnlocked || gInHook || [vc isKindOfClass:[TMPanelCtrl class]]) {
+        orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    if (vc) { gRealRoot = vc; gRootHost = (UIWindow *)self; }
+    // 锁还没建好时先放行，避免启动期替换根控制器导致崩溃
+    if (!gLockVC) {
+        orig_setRootVC(self, _cmd, vc);
+        return;
+    }
+    gInHook = YES;
+    orig_setRootVC(self, _cmd, gLockVC);
+    gInHook = NO;
+    
+    return;
+}
+
+
+// 任何控制器即将显示时：未解锁就把它的视图藏掉（在绘制之前，零帧泄漏）
+static void (*orig_vwa)(id, SEL, BOOL) = NULL;
+
+static void my_vwa(id self, SEL _cmd, BOOL animated) {
+    if (orig_vwa) orig_vwa(self, _cmd, animated);
+    if (gUnlocked) return;
+    if ([self isKindOfClass:[TMPanelCtrl class]]) return;
+    UIViewController *vc = (UIViewController *)self;
+    if (![vc isKindOfClass:[UIViewController class]]) return;
+    // 只处理 App 主窗口里的顶层控制器，绝不碰键盘/弹窗容器
+    NSString *cls = NSStringFromClass([vc class]);
+    if ([cls containsString:@"Keyboard"] || [cls containsString:@"Input"] ||
+        [cls containsString:@"TextEffects"] || [cls containsString:@"Alert"] ||
+        [cls containsString:@"Remote"] || [cls containsString:@"Lock"] ||
+        [cls containsString:@"Window"]) return;
+    if (vc.parentViewController != nil) return;          // 子控制器不动
+    if (vc.presentedViewController != nil) return;       // 有模态的不动
+    if (gAppWindow && vc.view.window && vc.view.window != gAppWindow) return;  // 只处理主窗口
+    vc.view.hidden = YES;
+    vc.view.alpha = 0.0;
+}
+
+// ===== 令牌验签（只内置公钥，无法伪造）=====
+static NSString *const kPubB64 = @"MIIBCgKCAQEAv77jQCwgCWbUGxaLiSlbOcBHHcLcWUkfw4J3vdtO22isO+y8lwcip7kGgK2/rnBxDGL8gl6vtTUWsEIWvIriOr6VrpZjgJZmVt5V7qfaofT9Ws0TaY5OZ2p3CuNM/oWODi7HCX9t+Cbp0f8AS+bsHuq4IqLT4ZmoJyz3DdUE6hwgP3Fy+W4Hlf+J5AlS5ubexXAV3JdDQvuwGHyJ0lM1EuhWeBUHPBWMU5eAS4UjTFhXMn7vIdkFdCkzsBtH16gN2gRFWOo/eYxxiD6CbX2/ccCwzw9MAVB/irXG7OwNKrhlH7eJoHFXHPMTPRoZ7sc5qadeAe/ggt7Kw9Is/NpTRwIDAQAB";
+
+static SecKeyRef LCPubKey(void) {
+    static SecKeyRef key = NULL;
+    if (key) return key;
+    NSData *der = [[NSData alloc] initWithBase64EncodedString:kPubB64 options:0];
+    if (!der) return NULL;
+    NSDictionary *attrs = @{(__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeRSA,
+                            (__bridge id)kSecAttrKeyClass: (__bridge id)kSecAttrKeyClassPublic,
+                            (__bridge id)kSecAttrKeySizeInBits: @2048};
+    CFErrorRef err = NULL;
+    key = SecKeyCreateWithData((__bridge CFDataRef)der, (__bridge CFDictionaryRef)attrs, &err);
+    return key;
+}
+
+// token = base64(msg) . base64(sig)   msg = TODAY|code|device|exp
+static double LCVerifyToken(NSString *token, NSString *code) {
+    if (!token.length) return 0;
+    NSArray *parts = [token componentsSeparatedByString:@"."];
+    if (parts.count != 2) return 0;
+    NSData *msgData = [[NSData alloc] initWithBase64EncodedString:parts[0] options:0];
+    NSData *sigData = [[NSData alloc] initWithBase64EncodedString:parts[1] options:0];
+    if (!msgData || !sigData) return 0;
+    SecKeyRef pub = LCPubKey();
+    if (!pub) return 0;
+    BOOL ok = SecKeyVerifySignature(pub, kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256,
+                                    (__bridge CFDataRef)msgData, (__bridge CFDataRef)sigData, NULL);
+    if (!ok) return 0;
+    NSString *msg = [[NSString alloc] initWithData:msgData encoding:NSUTF8StringEncoding];
+    NSArray *f = [msg componentsSeparatedByString:@"|"];
+    if (f.count != 4) return 0;
+    NSString *fc = f[1], *fd = f[2], *fe = f[3];
+    if (![fc isEqualToString:code]) return 0;
+    if (fd.length && ![fd isEqualToString:deviceId()]) return 0;
+    double exp = [fe doubleValue];
+    if (exp < [[NSDate date] timeIntervalSince1970]) return 0;
+    return exp;
+}
+
+// ===== 反调试 / 反注入 =====
+static void LCAntiTamper(void) {
+    // 1. 被调试
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc info;
+    size_t sz = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &sz, NULL, 0) == 0) {
+        if (info.kp_proc.p_flag & P_TRACED) { NSLog(@"[T] traced"); exit(0); }
+    }
+    // 2. 注入框架
+    uint32_t cnt = _dyld_image_count();
+    for (uint32_t i = 0; i < cnt; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (!nm) continue;
+        if (strstr(nm, "Frida") || strstr(nm, "frida") ||
+            strstr(nm, "substrate") || strstr(nm, "Substrate") ||
+            strstr(nm, "ellekit") || strstr(nm, "cycript") ||
+            strstr(nm, "SSLKillSwitch") || strstr(nm, "TweakInject")) {
+            NSLog(@"[T] inject: %s", nm);
+            exit(0);
+        }
+    }
+    // 3. 环境变量注入
+    if (getenv("DYLD_INSERT_LIBRARIES")) {
+        const char *e = getenv("DYLD_INSERT_LIBRARIES");
+        if (strstr(e, "Frida") || strstr(e, "frida") || strstr(e, "substrate")) exit(0);
+    }
+}
+
+static UIViewController *gHostVC = nil;
+
+static void LCHideAppUI(BOOL hide) { (void)hide; }
+
+// 把验证页挂进 App 的 RootViewController，并藏掉它原有内容
+
+// 启动时若已有有效卡密 → 后台静默校验一次，通过就直接解锁（避免重启后卡在输入页）
+
+static void LCEnsureLockIn(UIViewController *host);
+static void LCStartGuard(void);
+
+// 本地到期自检：断网也生效，30 秒粒度
+static NSTimer *gExpTimer = nil;
+
+static void LCStartExpiryWatch(void) {
+    if (gExpTimer) return;
+    gExpTimer = [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *t) {
+        if (!gUnlocked) return;
+        NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+        double exp = [d[@"e"] doubleValue];
+        if (exp <= 0) return;
+        if ([[NSDate date] timeIntervalSince1970] < exp) return;
+        
+        clearLicense();
+        gUnlocked = NO;
+        [t invalidate];
+        gExpTimer = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *host = gHostVC;
+            if (!host) {
+                for (UIWindow *w in [[UIApplication sharedApplication] windows])
+                    if (w.isKeyWindow && w.rootViewController) { host = w.rootViewController; break; }
+            }
+            if (host) {
+                LCEnsureLockIn(host);
+                LCStartGuard();
+            }
+        });
+    }];
+}
+
+static BOOL LCTryAutoUnlock(void) {
+    NSString *code = savedCode();
+    if (!code.length) return NO;
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
+    double exp = [d[@"e"] doubleValue];
+    if (exp > 0 && exp < [[NSDate date] timeIntervalSince1970]) {
+        
+        return NO;
+    }
+    // 先解锁，让界面可用，同时后台校验
+    dispatch_async(dispatch_get_main_queue(), ^{ LCUnlock(); });
+    [LCNet request:@"heartbeat" code:code done:^(BOOL reachable, BOOL ok, double e2, NSString *msg) {
+        if (!reachable) return;                 // 离线：保持已解锁
+        if (ok && e2 > 0) { saveLicense(code, e2); stampOnline(code); return; }
+        // 服务器说失效 → 重新上锁
+        clearLicense();
+        gUnlocked = NO;
+        
+    }];
+    return YES;
+}
+
+static void LCEnsureLockIn(UIViewController *host) {
+    if (!host || gUnlocked) return;
+    gHostVC = host;
+    if (!gLockVC) gLockVC = [[TMPanelCtrl alloc] init];
+    if (gLockVC.view.superview != host.view) {
+        gLockVC.view.frame = host.view.bounds;
+        gLockVC.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [host.view addSubview:gLockVC.view];
+    }
+    [host.view bringSubviewToFront:gLockVC.view];
+    for (UIView *v in host.view.subviews) {
+        if (v == gLockVC.view) continue;
+        if (!v.hidden) v.hidden = YES;
+    }
+}
+
+static void LCUnlock(void) {
+    if (gUnlocked) return;
+    gUnlocked = YES;
+    if (gGuard) { [gGuard invalidate]; gGuard = nil; }
+    if (gHostVC) {
+        for (UIView *v in gHostVC.view.subviews) {
+            if (v == gLockVC.view) continue;
+            v.hidden = NO;
+        }
+    }
+    [gLockVC.view removeFromSuperview];
+    gLockVC = nil;
+    LCStartExpiryWatch();
+    
+}
+
+static void LCGuardTick(void) {
+    if (gUnlocked) {
+        if (gGuard) { [gGuard invalidate]; gGuard = nil; }
+        return;
+    }
+    if (gHostVC) LCEnsureLockIn(gHostVC);
+}
+
+static void LCStartGuard(void) {
+    if (gGuard) return;
+    gGuard = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
+        LCGuardTick();
+    }];
+}
+
+static void LCShowLock(void) {
+    if (gUnlocked) return;
+    if (gHostVC) LCEnsureLockIn(gHostVC);
+}
+
+#pragma mark - Hook
+
+static void (*orig_makeKeyAndVisible)(id, SEL) = NULL;
+
+static void my_makeKeyAndVisible(id self, SEL _cmd) {
+    if (orig_makeKeyAndVisible) orig_makeKeyAndVisible(self, _cmd);
+    if (gUnlocked) return;
+    gAppWindow = (UIWindow *)self;
+    if (gLockVC) { LCHideAppUI(YES); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gUnlocked || gLockVC) return;
+        LCShowLock();
+    });
+}
+
+static void hookIfExists(const char *cls, SEL sel, IMP imp) {
+    Class c = objc_getClass(cls);
+    if (!c) return;
+    Method m = class_getInstanceMethod(c, sel);
+    if (m) method_setImplementation(m, imp);
+}
+
+static void gate_showGate(id self, SEL _cmd, id x) { }
+static void gate_noop(id self, SEL _cmd) { }
+
+// ==== 接管 RootViewController（日志确认：App 唯一根控制器）====
+static void (*orig_rvc_vda)(id, SEL, BOOL) = NULL;
+static void (*orig_rvc_vdl)(id, SEL) = NULL;
+
+static void my_rvc_vdl(id self, SEL _cmd) {
+    if (orig_rvc_vdl) orig_rvc_vdl(self, _cmd);
+    if (!gUnlocked) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!gUnlocked) { LCEnsureLockIn((UIViewController *)self); LCStartGuard(); }
+        });
+    }
+}
+
+static void my_rvc_vda(id self, SEL _cmd, BOOL animated) {
+    if (orig_rvc_vda) orig_rvc_vda(self, _cmd, animated);
+    if (gUnlocked) return;
+    if (LCTryAutoUnlock()) {
+        
+        return;
+    }
+    LCEnsureLockIn((UIViewController *)self);
+    LCStartGuard();
+    
+}
+
+static void LCAutoAttach(void) {
+    if (gUnlocked) return;
+    if (LCTryAutoUnlock()) return;
+    UIWindow *key = nil;
+    for (UIWindow *w in [[UIApplication sharedApplication] windows]) {
+        if (w.isKeyWindow) { key = w; break; }
+    }
+    if (!key) return;
+    UIViewController *root = key.rootViewController;
+    if (!root) return;
+    if (root == gLockVC) return;
+    if (gHostVC && gHostVC != root) { /* 换宿主了，重新挂 */ }
+    LCEnsureLockIn(root);
+    if (!gGuard) LCStartGuard();
+}
+
+__attribute__((constructor)) static void todayhook_init(void) {
+    LCAntiTamper();
+    Class wc = objc_getClass("UIWindow");
+    Method m = wc ? class_getInstanceMethod(wc, @selector(makeKeyAndVisible)) : NULL;
+    if (m) {
+        orig_makeKeyAndVisible = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_makeKeyAndVisible);
+    }
+    Class rvc = objc_getClass("RootViewController");
+    if (rvc) {
+        Method a = class_getInstanceMethod(rvc, @selector(viewDidAppear:));
+        if (a) {
+            orig_rvc_vda = (void (*)(id, SEL, BOOL))method_getImplementation(a);
+            if (!class_addMethod(rvc, @selector(viewDidAppear:), (IMP)my_rvc_vda,
+                                  method_getTypeEncoding(a))) {
+                method_setImplementation(a, (IMP)my_rvc_vda);
+            }
+            
+        }
+        Method b = class_getInstanceMethod(rvc, @selector(viewDidLoad));
+        if (b) {
+            orig_rvc_vdl = (void (*)(id, SEL))method_getImplementation(b);
+            if (!class_addMethod(rvc, @selector(viewDidLoad), (IMP)my_rvc_vdl,
+                                  method_getTypeEncoding(b))) {
+                method_setImplementation(b, (IMP)my_rvc_vdl);
+            }
+            
+        }
+    } else {
+        
+    }
+    hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
+    hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
+    hookIfExists("XQGate", @selector(doBeat), (IMP)gate_noop);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
+            if (gUnlocked) { [t invalidate]; return; }
+            LCAutoAttach();
+        }];
+    });
+    
+}
+
+
+// 菜单换肤 v1：接管 WDMenuView 的 cell 绘制，功能零改动
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kLog = @"/var/mobile/Media/xq_menu.log";
+#define THEME_KEY @"_td_menu_tint"
+#define BG_KEY    @"_td_menu_bg"
 
-static void L(NSString *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSDateFormatter *f = [NSDateFormatter new];
-    f.dateFormat = @"HH:mm:ss.SSS";
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [f stringFromDate:[NSDate date]], m];
-    FILE *fp = fopen(kLog.UTF8String, "a");
-    if (fp) { fputs(line.UTF8String, fp); fclose(fp); }
-    NSLog(@"%@", line);
-}
-
-static void DumpObject(id obj, NSString *tag) {
-    if (!obj) { L(@"%@ = nil", tag); return; }
-    Class c = object_getClass(obj);
-    L(@"==== %@ (%@) ====", tag, NSStringFromClass(c));
-    unsigned int n = 0;
-    objc_property_t *props = class_copyPropertyList(c, &n);
-    for (unsigned int i = 0; i < n; i++) {
-        const char *pn = property_getName(props[i]);
-        NSString *key = [NSString stringWithUTF8String:pn];
-        id val = nil;
-        @try { val = [obj valueForKey:key]; } @catch (NSException *e) { val = @"<取不到>"; }
-        NSString *desc = @"";
-        if ([val isKindOfClass:[NSString class]] || [val isKindOfClass:[NSNumber class]]) {
-            desc = [val description];
-        } else if ([val isKindOfClass:[NSArray class]]) {
-            desc = [NSString stringWithFormat:@"(数组 %lu 项)", (unsigned long)[(NSArray *)val count]];
-        } else if (val) {
-            desc = NSStringFromClass([val class]);
-        }
-        if (desc.length > 80) desc = [desc substringToIndex:80];
-        L(@"   %-24s = %@", pn, desc);
+static UIColor *TintColor(void) {
+    NSData *d = [[NSUserDefaults standardUserDefaults] objectForKey:THEME_KEY];
+    if (d) {
+        UIColor *c = [NSKeyedUnarchiver unarchivedObjectOfClass:[UIColor class] fromData:d error:nil];
+        if (c) return c;
     }
-    free(props);
+    return [UIColor colorWithRed:1.0 green:0.90 blue:0.50 alpha:1.0];   // #FFE680
 }
 
-static void DumpClassMethods(Class c, NSString *tag) {
-    L(@"---- %@ 方法 ----", tag);
-    unsigned int n = 0;
-    Method *ms = class_copyMethodList(c, &n);
-    for (unsigned int i = 0; i < n; i++) {
-        const char *sn = sel_getName(method_getName(ms[i]));
-        const char *types = method_getTypeEncoding(ms[i]);
-        L(@"   %-46s %s", sn, types ? types : "");
+static UIColor *BgColor(void) {
+    return [UIColor colorWithRed:0.102 green:0.114 blue:0.141 alpha:1.0];  // #1A1D24
+}
+
+static void SaveTint(UIColor *c) {
+    if (!c) return;
+    NSData *d = [NSKeyedArchiver archivedDataWithRootObject:c
+                                      requiringSecureCoding:NO error:nil];
+    [[NSUserDefaults standardUserDefaults] setObject:d forKey:THEME_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+// 递归给控件上色
+static void SkinView(UIView *v) {
+    if (!v) return;
+    UIColor *tint = TintColor();
+    if ([v isKindOfClass:[UISwitch class]]) {
+        UISwitch *s = (UISwitch *)v;
+        s.onTintColor = tint;
+    } else if ([v isKindOfClass:[UISlider class]]) {
+        UISlider *sl = (UISlider *)v;
+        sl.minimumTrackTintColor = tint;
+        sl.maximumTrackTintColor = [UIColor colorWithWhite:0.22 alpha:1];
+        sl.thumbTintColor = tint;
+    } else if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (l.font.pointSize >= 15) l.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+        else l.textColor = [UIColor colorWithWhite:0.62 alpha:1];
+    } else if ([v isKindOfClass:[UIImageView class]]) {
+        ((UIImageView *)v).tintColor = tint;
+    } else if ([v isKindOfClass:[UITableView class]]) {
+        UITableView *tv = (UITableView *)v;
+        tv.backgroundColor = BgColor();
+        tv.separatorColor = [UIColor colorWithWhite:0.18 alpha:1];
+    } else if ([v isKindOfClass:[UITableViewCell class]]) {
+        UITableViewCell *c = (UITableViewCell *)v;
+        c.backgroundColor = [UIColor colorWithRed:0.078 green:0.090 blue:0.114 alpha:1];
+        c.contentView.backgroundColor = c.backgroundColor;
+        c.layer.cornerRadius = 14;
+        c.layer.masksToBounds = YES;
+        c.layer.borderWidth = 1;
+        c.layer.borderColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
+        c.selectionStyle = UITableViewCellSelectionStyleNone;
     }
-    free(ms);
+    for (UIView *s in v.subviews) SkinView(s);
 }
 
-// ---- hooks ----
-static void (*orig_showMenu)(id, SEL) = NULL;
-static void my_showMenu(id self, SEL _cmd) {
-    L(@"### showMenu: 被调用，对象=%@", NSStringFromClass([self class]));
-    DumpObject(self, @"WDMenuView 实例");
-    Class wd = objc_getClass("WDRow");
-    if (wd) { DumpClassMethods(wd, @"WDRow"); }
-    if (orig_showMenu) orig_showMenu(self, _cmd);
-}
+// hook cellForRowAtIndexPath（如果 WDMenuView 实现了它）
+static id (*orig_cellForRow)(id, SEL, UITableView *, NSIndexPath *) = NULL;
 
-static void (*orig_initRow)(id, SEL, id, id) = NULL;
-static void my_initRow(id self, SEL _cmd, id row, id menu) {
-    if (orig_initRow) orig_initRow(self, _cmd, row, menu);
-    static int cnt = 0;
-    if (cnt++ < 40) {
-        DumpObject(row, [NSString stringWithFormat:@"WDRow#%d", cnt]);
-        id v = nil;
-        @try { v = [row valueForKey:@"action"]; } @catch (NSException *e) {}
-        if (v) L(@"   action 类型 = %@", NSStringFromClass([v class]));
-        id sub = nil;
-        @try { sub = [row valueForKey:@"subRows"]; } @catch (NSException *e) {}
-        if ([sub isKindOfClass:[NSArray class]]) {
-            L(@"   subRows = %lu 项", (unsigned long)[(NSArray *)sub count]);
-            for (id s in sub) {
-                if ([s respondsToSelector:@selector(valueForKey:)]) {
-                    id t = nil; @try { t = [s valueForKey:@"title"]; } @catch (NSException *e) {}
-                    L(@"      · %@", t);
-                }
-            }
-        }
+static id my_cellForRow(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    UITableViewCell *cell = orig_cellForRow ? orig_cellForRow(self, _cmd, tv, ip) : nil;
+    tv.backgroundColor = BgColor();
+    tv.separatorStyle = UITableViewCellSeparatorStyleNone;
+    if (cell) {
+        SkinView(cell);
+        CGRect f = cell.frame;
+        cell.frame = f;
     }
+    return cell;
 }
 
-__attribute__((constructor)) static void probe_init(void) {
-    L(@"===== 菜单探针启动 =====");
+__attribute__((constructor)) static void skin_init(void) {
     Class m = objc_getClass("WDMenuView");
-    if (m) {
-        DumpClassMethods(m, @"WDMenuView");
-        Method s1 = class_getInstanceMethod(m, @selector(showMenu));
-        if (s1) { orig_showMenu = (void (*)(id, SEL))method_getImplementation(s1);
-                  method_setImplementation(s1, (IMP)my_showMenu); L(@"hook showMenu 成功"); }
-        else L(@"showMenu 方法不存在");
-    } else L(@"找不到 WDMenuView");
-    Class r = objc_getClass("WDRow");
-    if (r) {
-        DumpClassMethods(r, @"WDRow");
-        Method s2 = class_getInstanceMethod(r, @selector(initWithRow:menu:));
-        if (s2) { orig_initRow = (void (*)(id, SEL, id, id))method_getImplementation(s2);
-                  method_setImplementation(s2, (IMP)my_initRow); L(@"hook initWithRow:menu: 成功"); }
-        else L(@"initWithRow:menu: 不存在");
-    } else L(@"找不到 WDRow");
-    L(@"===== 探针就绪 =====");
+    if (!m) { NSLog(@"[skin] 没有 WDMenuView"); return; }
+    SEL sel = @selector(tableView:cellForRowAtIndexPath:);
+    Method mm = class_getInstanceMethod(m, sel);
+    if (mm) {
+        orig_cellForRow = (id (*)(id, SEL, UITableView *, NSIndexPath *))method_getImplementation(mm);
+        if (!class_addMethod(m, sel, (IMP)my_cellForRow, method_getTypeEncoding(mm))) {
+            method_setImplementation(mm, (IMP)my_cellForRow);
+        }
+        NSLog(@"[skin] cell 钩子已挂载");
+    } else {
+        NSLog(@"[skin] WDMenuView 未实现 cellForRow");
+    }
 }
+

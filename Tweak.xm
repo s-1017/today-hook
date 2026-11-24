@@ -415,6 +415,7 @@ static void LCForceLock(NSString *reason);
             saveLicense(code, exp);
             stampOnline(code);
             NSString *msgStr = [msg isKindOfClass:[NSString class]] ? msg : @"";
+            NSString *msgStr = [msg isKindOfClass:[NSString class]] ? (NSString *)msg : @"";
             if (msgStr.length && [msgStr rangeOfString:@"|"].location != NSNotFound) {
                 [[NSUserDefaults standardUserDefaults] setObject:msgStr forKey:@"_today_token"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
@@ -446,24 +447,6 @@ static void LCForceLock(NSString *reason);
         }
         self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
         self->_status.text = @"需要联网验证（离线令牌无效或已过期）";
-        NSInteger days = verifyCodeDays(code);
-        if (days > 0) {
-            double act = [[NSDate date] timeIntervalSince1970];
-            NSDictionary *old = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
-            if ([old isKindOfClass:[NSDictionary class]] &&
-                [old[@"c"] isEqualToString:code] && [old[@"a"] doubleValue] > 0) {
-                act = [old[@"a"] doubleValue];      // 同一张卡沿用首次激活时间
-            }
-            double exp = act + days * 86400.0;
-            saveLicenseEx(code, exp, act);
-            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
-            self->_status.text = [NSString stringWithFormat:@"离线验证通过 · 有效期至 %@", fmtTime(exp)];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ LCUnlock(); });
-        } else {
-            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
-            self->_status.text = @"网络不可用，且卡密格式无效";
-        }
     }];
 }
 

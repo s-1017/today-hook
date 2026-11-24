@@ -12,13 +12,13 @@
 #import <CommonCrypto/CommonHMAC.h>
 #import <objc/runtime.h>
 #import <Security/Security.h>
+#include <sys/sysctl.h>
+#include <unistd.h>
 
-static NSString *const kSecret = @"TODAY-HMAC-2026-ChAnGeMe-9f3a7c";
 static NSString *const kStoreKey = @"_today_lic_v1";
 static NSString *const kDevKey = @"_today_dev_id";
 static NSString *const kAPIBase = @"https://134.175.44.168/api/v1";
 static const int kEpochDay = 18262;
-static NSString *const kB32 = @"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 static UIWindow *gAppWindow = nil;
 static UIViewController *gRealRoot = nil;
@@ -29,8 +29,8 @@ static NSTimer *gGuard = nil;
 static NSTimer *gBeat = nil;
 static BOOL gInHook = NO;
 static BOOL gUnlocked = NO;
-@class LCLockVC;
-static LCLockVC *gLockVC = nil;
+@class TMPanelCtrl;
+static TMPanelCtrl *gLockVC = nil;
 static UIWindow *gLockWin = nil;
 
 #define LC_BLUE [UIColor colorWithRed:0.18 green:0.48 blue:0.96 alpha:1.0]
@@ -41,34 +41,9 @@ static UIWindow *gLockWin = nil;
 
 #pragma mark - Base32 / HMAC（离线兜底）
 
-static NSData *b32decode(NSString *s) {
-    NSMutableArray *bits = [NSMutableArray array];
-    unichar buf[128];
-    NSUInteger n = MIN(s.length, 128);
-    [s getCharacters:buf range:NSMakeRange(0, n)];
-    for (NSUInteger i = 0; i < n; i++) {
-        unichar c = buf[i];
-        if (c == '-' || c == ' ') continue;
-        NSString *one = [NSString stringWithCharacters:&c length:1];
-        NSInteger v = [kB32 rangeOfString:one].location;
-        if (v == NSNotFound) return nil;
-        for (int b = 4; b >= 0; b--) [bits addObject:@((v >> b) & 1)];
-    }
-    NSMutableData *out = [NSMutableData data];
-    for (NSUInteger i = 0; i + 8 <= bits.count; i += 8) {
-        uint8_t byte = 0;
-        for (int b = 0; b < 8; b++) byte = (uint8_t)((byte << 1) | [bits[i + b] intValue]);
-        [out appendBytes:&byte length:1];
-    }
-    return out;
-}
 
-static NSData *hmac5(NSData *msg) {
-    unsigned char mac[CC_SHA256_DIGEST_LENGTH];
-    CCHmac(kCCHmacAlgSHA256, kSecret.UTF8String, strlen(kSecret.UTF8String),
-           msg.bytes, msg.length, mac);
-    return [NSData dataWithBytes:mac length:5];
-}
+
+
 
 // 返回天数（>0 有效）；-1 格式/签名错误
 static NSInteger verifyCodeDays(NSString *raw) {
@@ -178,7 +153,7 @@ static NSString *deviceId(void) {
         [u setObject:d forKey:kDevKey];
         [u synchronize];
     }
-    if (!kcSet(d)) NSLog(@"[TodayHook] Keychain 写入失败，设备ID 仅存本地");
+    if (!kcSet(d)) 
     return d;
 }
 
@@ -244,14 +219,14 @@ static NSString *fmtTime(double ts) {
 static void LCUnlock(void);
 static void LCForceLock(NSString *reason);
 
-@interface LCLockVC : UIViewController <UITextFieldDelegate>
+@interface TMPanelCtrl : UIViewController <UITextFieldDelegate>
 @property (nonatomic, strong) UITextField *field;
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UIButton *btn;
 @property (nonatomic, strong) UIView *card;
 @end
 
-@implementation LCLockVC
+@implementation TMPanelCtrl
 
 - (void)loadView {
     UIView *v = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -451,6 +426,10 @@ static void LCForceLock(NSString *reason);
         if (reachable && ok && exp > 0) {
             saveLicense(code, exp);
             stampOnline(code);
+            if (msg.length && [msg rangeOfString:@"|"].location != NSNotFound) {
+                [[NSUserDefaults standardUserDefaults] setObject:msg forKey:@"_today_token"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            }
             [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"_today_typed"];
             self->_status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];
             self->_status.text = [NSString stringWithFormat:@"验证通过 · 有效期至 %@", fmtTime(exp)];
@@ -465,11 +444,19 @@ static void LCForceLock(NSString *reason);
             return;
         }
         // 网络不可达 → 离线兜底（必须本机联网验证过且在 24h 内）
-        if (!offlineAllowed(code)) {
-            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
-            self->_status.text = @"无法连接服务器。设备锁需要联网校验，请检查网络后重试";
+        // 离线：只认服务端签发的令牌（无本地密钥，无法伪造）
+        NSString *savedTok = [[NSUserDefaults standardUserDefaults] objectForKey:@"_today_token"];
+        double tokExp = LCVerifyToken(savedTok, code);
+        if (tokExp > [[NSDate date] timeIntervalSince1970]) {
+            saveLicense(code, tokExp);
+            self->_status.textColor = [UIColor colorWithRed:0.95 green:0.72 blue:0.24 alpha:1];
+            self->_status.text = [NSString stringWithFormat:@"离线验证通过 · 有效期至 %@", fmtTime(tokExp)];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ LCUnlock(); });
             return;
         }
+        self->_status.textColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.35 alpha:1];
+        self->_status.text = @"需要联网验证（离线令牌无效或已过期）";
         NSInteger days = verifyCodeDays(code);
         if (days > 0) {
             double act = [[NSDate date] timeIntervalSince1970];
@@ -507,7 +494,7 @@ static void LCStartBeat(void) {
         [LCNet request:@"heartbeat" code:c done:^(BOOL reachable, BOOL ok, double exp, NSString *msg) {
             if (!reachable) return;                 // 离线：放行，等下次
             if (ok && exp > 0) { saveLicense(c, exp); stampOnline(c); return; }
-            NSLog(@"[TodayHook] 服务器判定失效: %@", msg);
+            
             clearLicense();
             LCForceLock(msg.length ? msg : @"授权已失效");
         }];
@@ -563,7 +550,7 @@ static void LCShowLock(void);
 
 static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
     if (!orig_setRootVC) return;
-    if (gUnlocked || gInHook || [vc isKindOfClass:[LCLockVC class]]) {
+    if (gUnlocked || gInHook || [vc isKindOfClass:[TMPanelCtrl class]]) {
         orig_setRootVC(self, _cmd, vc);
         return;
     }
@@ -576,7 +563,7 @@ static void my_setRootVC(id self, SEL _cmd, UIViewController *vc) {
     gInHook = YES;
     orig_setRootVC(self, _cmd, gLockVC);
     gInHook = NO;
-    NSLog(@"[TodayHook] 根控制器被拦截");
+    
     return;
 }
 
@@ -587,7 +574,7 @@ static void (*orig_vwa)(id, SEL, BOOL) = NULL;
 static void my_vwa(id self, SEL _cmd, BOOL animated) {
     if (orig_vwa) orig_vwa(self, _cmd, animated);
     if (gUnlocked) return;
-    if ([self isKindOfClass:[LCLockVC class]]) return;
+    if ([self isKindOfClass:[TMPanelCtrl class]]) return;
     UIViewController *vc = (UIViewController *)self;
     if (![vc isKindOfClass:[UIViewController class]]) return;
     // 只处理 App 主窗口里的顶层控制器，绝不碰键盘/弹窗容器
@@ -601,6 +588,75 @@ static void my_vwa(id self, SEL _cmd, BOOL animated) {
     if (gAppWindow && vc.view.window && vc.view.window != gAppWindow) return;  // 只处理主窗口
     vc.view.hidden = YES;
     vc.view.alpha = 0.0;
+}
+
+// ===== 令牌验签（只内置公钥，无法伪造）=====
+static NSString *const kPubB64 = @"MIIBCgKCAQEAv77jQCwgCWbUGxaLiSlbOcBHHcLcWUkfw4J3vdtO22isO+y8lwcip7kGgK2/rnBxDGL8gl6vtTUWsEIWvIriOr6VrpZjgJZmVt5V7qfaofT9Ws0TaY5OZ2p3CuNM/oWODi7HCX9t+Cbp0f8AS+bsHuq4IqLT4ZmoJyz3DdUE6hwgP3Fy+W4Hlf+J5AlS5ubexXAV3JdDQvuwGHyJ0lM1EuhWeBUHPBWMU5eAS4UjTFhXMn7vIdkFdCkzsBtH16gN2gRFWOo/eYxxiD6CbX2/ccCwzw9MAVB/irXG7OwNKrhlH7eJoHFXHPMTPRoZ7sc5qadeAe/ggt7Kw9Is/NpTRwIDAQAB";
+
+static SecKeyRef LCPubKey(void) {
+    static SecKeyRef key = NULL;
+    if (key) return key;
+    NSData *der = [[NSData alloc] initWithBase64EncodedString:kPubB64 options:0];
+    if (!der) return NULL;
+    NSDictionary *attrs = @{(__bridge id)kSecAttrKeyType: (__bridge id)kSecAttrKeyTypeRSA,
+                            (__bridge id)kSecAttrKeyClass: (__bridge id)kSecAttrKeyClassPublic,
+                            (__bridge id)kSecAttrKeySizeInBits: @2048};
+    CFErrorRef err = NULL;
+    key = SecKeyCreateWithData((__bridge CFDataRef)der, (__bridge CFDictionaryRef)attrs, &err);
+    return key;
+}
+
+// token = base64(msg) . base64(sig)   msg = TODAY|code|device|exp
+static double LCVerifyToken(NSString *token, NSString *code) {
+    if (!token.length) return 0;
+    NSArray *parts = [token componentsSeparatedByString:@"."];
+    if (parts.count != 2) return 0;
+    NSData *msgData = [[NSData alloc] initWithBase64EncodedString:parts[0] options:0];
+    NSData *sigData = [[NSData alloc] initWithBase64EncodedString:parts[1] options:0];
+    if (!msgData || !sigData) return 0;
+    SecKeyRef pub = LCPubKey();
+    if (!pub) return 0;
+    BOOL ok = SecKeyVerifySignature(pub, kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256,
+                                    (__bridge CFDataRef)msgData, (__bridge CFDataRef)sigData, NULL);
+    if (!ok) return 0;
+    NSString *msg = [[NSString alloc] initWithData:msgData encoding:NSUTF8StringEncoding];
+    NSArray *f = [msg componentsSeparatedByString:@"|"];
+    if (f.count != 4) return 0;
+    if (![f[1] isEqualToString:code]) return 0;
+    if (f[2].length && ![f[2] isEqualToString:deviceId()]) return 0;
+    double exp = [f[3] doubleValue];
+    if (exp < [[NSDate date] timeIntervalSince1970]) return 0;
+    return exp;
+}
+
+// ===== 反调试 / 反注入 =====
+static void LCAntiTamper(void) {
+    // 1. 被调试
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc info;
+    size_t sz = sizeof(info);
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &sz, NULL, 0) == 0) {
+        if (info.kp_proc.p_flag & P_TRACED) { NSLog(@"[T] traced"); exit(0); }
+    }
+    // 2. 注入框架
+    uint32_t cnt = _dyld_image_count();
+    for (uint32_t i = 0; i < cnt; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (!nm) continue;
+        if (strstr(nm, "Frida") || strstr(nm, "frida") ||
+            strstr(nm, "substrate") || strstr(nm, "Substrate") ||
+            strstr(nm, "ellekit") || strstr(nm, "cycript") ||
+            strstr(nm, "SSLKillSwitch") || strstr(nm, "TweakInject")) {
+            NSLog(@"[T] inject: %s", nm);
+            exit(0);
+        }
+    }
+    // 3. 环境变量注入
+    if (getenv("DYLD_INSERT_LIBRARIES")) {
+        const char *e = getenv("DYLD_INSERT_LIBRARIES");
+        if (strstr(e, "Frida") || strstr(e, "frida") || strstr(e, "substrate")) exit(0);
+    }
 }
 
 static UIViewController *gHostVC = nil;
@@ -625,7 +681,7 @@ static void LCStartExpiryWatch(void) {
         double exp = [d[@"e"] doubleValue];
         if (exp <= 0) return;
         if ([[NSDate date] timeIntervalSince1970] < exp) return;
-        NSLog(@"[TodayHook] 卡密已到期，锁定");
+        
         clearLicense();
         gUnlocked = NO;
         [t invalidate];
@@ -650,7 +706,7 @@ static BOOL LCTryAutoUnlock(void) {
     NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
     double exp = [d[@"e"] doubleValue];
     if (exp > 0 && exp < [[NSDate date] timeIntervalSince1970]) {
-        NSLog(@"[TodayHook] 本地卡密已过期");
+        
         return NO;
     }
     // 先解锁，让界面可用，同时后台校验
@@ -661,7 +717,7 @@ static BOOL LCTryAutoUnlock(void) {
         // 服务器说失效 → 重新上锁
         clearLicense();
         gUnlocked = NO;
-        NSLog(@"[TodayHook] 服务器判定失效：%@", msg);
+        
     }];
     return YES;
 }
@@ -669,7 +725,7 @@ static BOOL LCTryAutoUnlock(void) {
 static void LCEnsureLockIn(UIViewController *host) {
     if (!host || gUnlocked) return;
     gHostVC = host;
-    if (!gLockVC) gLockVC = [[LCLockVC alloc] init];
+    if (!gLockVC) gLockVC = [[TMPanelCtrl alloc] init];
     if (gLockVC.view.superview != host.view) {
         gLockVC.view.frame = host.view.bounds;
         gLockVC.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -695,7 +751,7 @@ static void LCUnlock(void) {
     [gLockVC.view removeFromSuperview];
     gLockVC = nil;
     LCStartExpiryWatch();
-    NSLog(@"[TodayHook] 已解锁");
+    
 }
 
 static void LCGuardTick(void) {
@@ -762,12 +818,12 @@ static void my_rvc_vda(id self, SEL _cmd, BOOL animated) {
     if (orig_rvc_vda) orig_rvc_vda(self, _cmd, animated);
     if (gUnlocked) return;
     if (LCTryAutoUnlock()) {
-        NSLog(@"[TodayHook] 已有有效卡密，自动解锁");
+        
         return;
     }
     LCEnsureLockIn((UIViewController *)self);
     LCStartGuard();
-    NSLog(@"[TodayHook] RootViewController 出现，已挂锁");
+    
 }
 
 static void LCAutoAttach(void) {
@@ -787,6 +843,7 @@ static void LCAutoAttach(void) {
 }
 
 __attribute__((constructor)) static void todayhook_init(void) {
+    LCAntiTamper();
     Class wc = objc_getClass("UIWindow");
     Method m = wc ? class_getInstanceMethod(wc, @selector(makeKeyAndVisible)) : NULL;
     if (m) {
@@ -802,7 +859,7 @@ __attribute__((constructor)) static void todayhook_init(void) {
                                   method_getTypeEncoding(a))) {
                 method_setImplementation(a, (IMP)my_rvc_vda);
             }
-            NSLog(@"[TodayHook] RootViewController.viewDidAppear 已接管");
+            
         }
         Method b = class_getInstanceMethod(rvc, @selector(viewDidLoad));
         if (b) {
@@ -811,10 +868,10 @@ __attribute__((constructor)) static void todayhook_init(void) {
                                   method_getTypeEncoding(b))) {
                 method_setImplementation(b, (IMP)my_rvc_vdl);
             }
-            NSLog(@"[TodayHook] RootViewController.viewDidLoad 已接管");
+            
         }
     } else {
-        NSLog(@"[TodayHook] 没找到 RootViewController");
+        
     }
     hookIfExists("XQGate", @selector(showGate:), (IMP)gate_showGate);
     hookIfExists("XQGate", @selector(startHeartbeat), (IMP)gate_noop);
@@ -826,5 +883,5 @@ __attribute__((constructor)) static void todayhook_init(void) {
             LCAutoAttach();
         }];
     });
-    NSLog(@"[TodayHook] v13 loaded");
+    
 }

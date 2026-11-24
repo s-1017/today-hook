@@ -14,6 +14,9 @@
 #import <Security/Security.h>
 #include <sys/sysctl.h>
 #include <mach-o/dyld.h>
+
+static double LCVerifyToken(NSString *token, NSString *code);
+
 #include <unistd.h>
 
 static NSString *const kStoreKey = @"_today_lic_v1";
@@ -631,7 +634,6 @@ static void LCAntiTamper(void) {
     }
 }
 
-static double LCVerifyToken(NSString *token, NSString *code);
 static UIViewController *gHostVC = nil;
 
 static void LCHideAppUI(BOOL hide) { (void)hide; }

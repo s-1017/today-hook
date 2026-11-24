@@ -13,6 +13,7 @@
 #import <objc/runtime.h>
 #import <Security/Security.h>
 #include <sys/sysctl.h>
+#include <mach-o/dyld.h>
 #include <unistd.h>
 
 static NSString *const kStoreKey = @"_today_lic_v1";
@@ -46,20 +47,7 @@ static UIWindow *gLockWin = nil;
 
 
 // 返回天数（>0 有效）；-1 格式/签名错误
-static NSInteger verifyCodeDays(NSString *raw) {
-    if (!raw.length) return -1;
-    NSString *s = [[raw stringByTrimmingCharactersInSet:
-                    [NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
-    if ([s hasPrefix:@"TODAY"]) s = [s substringFromIndex:5];
-    NSData *bin = b32decode(s);
-    if (bin.length < 9) return -1;
-    NSData *body = [bin subdataWithRange:NSMakeRange(0, 4)];
-    NSData *mac = [bin subdataWithRange:NSMakeRange(4, 5)];
-    if (![mac isEqualToData:hmac5(body)]) return -1;
-    const uint8_t *b = (const uint8_t *)body.bytes;
-    NSInteger days = ((NSInteger)b[0] << 8) | b[1];
-    return days > 0 ? days : -1;
-}
+
 
 #pragma mark - 本地存储
 
@@ -426,8 +414,9 @@ static void LCForceLock(NSString *reason);
         if (reachable && ok && exp > 0) {
             saveLicense(code, exp);
             stampOnline(code);
-            if (msg.length && [msg rangeOfString:@"|"].location != NSNotFound) {
-                [[NSUserDefaults standardUserDefaults] setObject:msg forKey:@"_today_token"];
+            NSString *msgStr = [msg isKindOfClass:[NSString class]] ? msg : @"";
+            if (msgStr.length && [msgStr rangeOfString:@"|"].location != NSNotFound) {
+                [[NSUserDefaults standardUserDefaults] setObject:msgStr forKey:@"_today_token"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
             }
             [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"_today_typed"];
@@ -659,6 +648,7 @@ static void LCAntiTamper(void) {
     }
 }
 
+static double LCVerifyToken(NSString *token, NSString *code);
 static UIViewController *gHostVC = nil;
 
 static void LCHideAppUI(BOOL hide) { (void)hide; }

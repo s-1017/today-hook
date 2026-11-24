@@ -418,7 +418,6 @@ static void LCForceLock(NSString *reason);
             saveLicense(code, exp);
             stampOnline(code);
             NSString *msgStr = [msg isKindOfClass:[NSString class]] ? msg : @"";
-            NSString *msgStr = [msg isKindOfClass:[NSString class]] ? (NSString *)msg : @"";
             if (msgStr.length && [msgStr rangeOfString:@"|"].location != NSNotFound) {
                 [[NSUserDefaults standardUserDefaults] setObject:msgStr forKey:@"_today_token"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
@@ -597,9 +596,10 @@ static double LCVerifyToken(NSString *token, NSString *code) {
     NSString *msg = [[NSString alloc] initWithData:msgData encoding:NSUTF8StringEncoding];
     NSArray *f = [msg componentsSeparatedByString:@"|"];
     if (f.count != 4) return 0;
-    if (![f[1] isEqualToString:code]) return 0;
-    if (f[2].length && ![f[2] isEqualToString:deviceId()]) return 0;
-    double exp = [f[3] doubleValue];
+    NSString *fc = f[1], *fd = f[2], *fe = f[3];
+    if (![fc isEqualToString:code]) return 0;
+    if (fd.length && ![fd isEqualToString:deviceId()]) return 0;
+    double exp = [fe doubleValue];
     if (exp < [[NSDate date] timeIntervalSince1970]) return 0;
     return exp;
 }

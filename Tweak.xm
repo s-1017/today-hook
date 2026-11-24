@@ -1128,6 +1128,9 @@ static void my_showMenu(id self, SEL _cmd) {
 
 __attribute__((constructor)) static void tdmenu_init(void) {
     NSLog(@"[tdmenu] 加载");
+    // 诊断用：8 秒后自动弹出，验证我们的窗口能否盖在游戏上
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ ShowMenu(); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         Class m = objc_getClass("WDMenuView");

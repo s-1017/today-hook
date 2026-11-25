@@ -960,6 +960,6 @@ static void DoHook(void) {
 __attribute__((constructor)) static void im_init(void) {
     NSLog(@"[m] imgui menu loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ DoHook(); });
+                   dispatch_get_main_queue(), ^{ /* DoHook disabled */ });
 }
 

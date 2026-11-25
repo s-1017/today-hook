@@ -64,21 +64,19 @@ static void saveLicenseEx(NSString *code, double expireTs, double activatedTs) {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     [u setObject:@{@"c": code ?: @"", @"e": @(expireTs), @"a": @(activatedTs),
                    @"t": @([[NSDate date] timeIntervalSince1970])} forKey:kStoreKey];
-    [u synchronize];
-}
+    }
 
 static NSString *savedCode(void) {
     NSDictionary *d = [[NSUserDefaults standardUserDefaults] objectForKey:kStoreKey];
     if (![d isKindOfClass:[NSDictionary class]]) return nil;
-    NSString *c = d[@"c"];
-    return [c isKindOfClass:[NSString class]] ? c : nil;
+    id c = d[@"c"];
+    return [c isKindOfClass:[NSString class]] ? (NSString *)c : nil;
 }
 
 static void clearLicense(void) {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     [u removeObjectForKey:kStoreKey];
-    [u synchronize];
-}
+    }
 
 // ---- Keychain 读写（重装 App 不丢设备 ID）----
 static NSString *kcGet(void) {
@@ -118,8 +116,7 @@ static void stampOnline(NSString *code) {
     d[@"dv"] = deviceId();
     d[@"c"] = code ?: @"";
     [u setObject:d forKey:kStoreKey];
-    [u synchronize];
-}
+    }
 
 // 离线放行必须：同一设备 + 同一卡密 + 24 小时内联网成功过
 static BOOL offlineAllowed(NSString *code) {
@@ -142,8 +139,7 @@ static NSString *deviceId(void) {
     if (![d isKindOfClass:[NSString class]] || d.length < 6) {
         d = [[NSUUID UUID] UUIDString];
         [u setObject:d forKey:kDevKey];
-        [u synchronize];
-    }
+            }
     if (!kcSet(d)) 
     return d;
 }
@@ -380,8 +376,7 @@ static void LCForceLock(NSString *reason);
 - (void)onEdit {
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     [u setObject:(self.field.text ?: @"") forKey:@"_today_typed"];
-    [u synchronize];
-}
+    }
 
 - (void)doClear {
     clearLicense();
@@ -420,7 +415,7 @@ static void LCForceLock(NSString *reason);
             NSString *msgStr = [msg isKindOfClass:[NSString class]] ? msg : @"";
             if (msgStr.length && [msgStr rangeOfString:@"|"].location != NSNotFound) {
                 [[NSUserDefaults standardUserDefaults] setObject:msgStr forKey:@"_today_token"];
-                [[NSUserDefaults standardUserDefaults] synchronize];
+                
             }
             [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"_today_typed"];
             self->_status.textColor = [UIColor colorWithRed:0.24 green:0.78 blue:0.42 alpha:1];

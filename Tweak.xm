@@ -872,205 +872,62 @@ __attribute__((constructor)) static void todayhook_init(void) {
 }
 
 
+// 屏蔽 App 自带的 SVProgressHUD 加载层（"安全模块加载中"）
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-#define AC [UIColor colorWithRed:1.0 green:0.902 blue:0.502 alpha:1.0]
-#define BG [UIColor colorWithRed:0.102 green:0.114 blue:0.141 alpha:0.97]
-#define CD [UIColor colorWithRed:0.078 green:0.090 blue:0.114 alpha:1.0]
-#define EG [UIColor colorWithRed:0.227 green:0.247 blue:0.290 alpha:1.0]
-#define IK [UIColor colorWithRed:0.910 green:0.922 blue:0.941 alpha:1.0]
-#define GY [UIColor colorWithRed:0.540 green:0.565 blue:0.620 alpha:1.0]
-
-static UIView *gOverlay = nil;
-static BOOL gShown = NO;
-
-@interface TDOverlay : UIView
-@property (nonatomic, strong) UIView *content;
-@property (nonatomic, strong) NSMutableArray *tabBtns;
-@property (nonatomic, copy) NSString *tab;
-@end
-
-@implementation TDOverlay
-
-- (instancetype)initWithFrame:(CGRect)f {
-    self = [super initWithFrame:f];
-    if (!self) return nil;
-    self.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-    self.tab = @"视觉";
-    self.tabBtns = [NSMutableArray array];
-
-    CGFloat w = MIN(f.size.width - 90, 700);
-    CGFloat h = MIN(f.size.height - 120, 560);
-    UIView *p = [[UIView alloc] initWithFrame:CGRectMake((f.size.width - w)/2, (f.size.height - h)/2, w, h)];
-    p.backgroundColor = BG;
-    p.layer.cornerRadius = 18;
-    p.layer.borderWidth = 1;
-    p.layer.borderColor = EG.CGColor;
-    [self addSubview:p];
-
-    UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(22, 16, 200, 34)];
-    t.text = @"Today";
-    t.textColor = AC;
-    t.font = [UIFont boldSystemFontOfSize:26];
-    [p addSubview:t];
-
-    UILabel *s = [[UILabel alloc] initWithFrame:CGRectMake(118, 24, 120, 22)];
-    s.text = @"内部版";
-    s.textColor = GY;
-    s.font = [UIFont systemFontOfSize:13];
-    [p addSubview:s];
-
-    UIView *ln = [[UIView alloc] initWithFrame:CGRectMake(18, 58, w - 36, 1)];
-    ln.backgroundColor = EG;
-    [p addSubview:ln];
-
-    NSArray *tabs = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    CGFloat y = 72;
-    for (NSUInteger i = 0; i < tabs.count; i++) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-        b.frame = CGRectMake(14, y, 92, 86);
-        b.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
-        b.layer.cornerRadius = 12;
-        [b setTitle:tabs[i] forState:UIControlStateNormal];
-        [b setTitleColor:IK forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-        b.tag = (NSInteger)i;
-        [b addTarget:self action:@selector(onTab:) forControlEvents:UIControlEventTouchUpInside];
-        [p addSubview:b];
-        [self.tabBtns addObject:b];
-        y += 94;
-    }
-
-    UIView *vl = [[UIView alloc] initWithFrame:CGRectMake(116, 70, 1, h - 92)];
-    vl.backgroundColor = EG;
-    [p addSubview:vl];
-
-    self.content = [[UIView alloc] initWithFrame:CGRectMake(128, 70, w - 146, h - 92)];
-    self.content.clipsToBounds = YES;
-    [p addSubview:self.content];
-
-    UIButton *x = [UIButton buttonWithType:UIButtonTypeCustom];
-    x.frame = CGRectMake(w - 52, 16, 34, 34);
-    x.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1];
-    x.layer.cornerRadius = 17;
-    [x setTitle:@"✕" forState:UIControlStateNormal];
-    [x setTitleColor:GY forState:UIControlStateNormal];
-    [x addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
-    [p addSubview:x];
-
-    [self render];
-    return self;
+static BOOL IsBlocked(id status) {
+    if (![status isKindOfClass:[NSString class]]) return YES;   // 无文字也拦
+    NSString *s = (NSString *)status;
+    return [s containsString:@"安全"] || [s containsString:@"加载"] || [s containsString:@"模块"] || s.length == 0;
 }
 
-- (void)onTab:(UIButton *)b {
-    NSArray *tabs = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    self.tab = tabs[(NSUInteger)b.tag];
-    [self render];
+static void (*o_showStatus)(id, SEL, id) = NULL;
+static void n_showStatus(id self, SEL _cmd, id status) {
+    if (IsBlocked(status)) { NSLog(@"[hud] blocked: %@", status); return; }
+    if (o_showStatus) o_showStatus(self, _cmd, status);
 }
 
-- (void)close { gShown = NO; self.hidden = YES; }
+static void (*o_show)(id, SEL) = NULL;
+static void n_show(id self, SEL _cmd) {
+    NSLog(@"[hud] blocked show()");      // 无文字的纯加载层也拦
+}
 
-- (void)render {
-    for (UIView *v in [self.content.subviews copy]) [v removeFromSuperview];
+static void (*o_showMask)(id, SEL, NSUInteger) = NULL;
+static void n_showMask(id self, SEL _cmd, NSUInteger t) {
+    NSLog(@"[hud] blocked showWithMaskType");
+}
 
-    NSArray *tabs = @[@"视觉", @"自瞄", @"枪械", @"设置"];
-    for (NSUInteger i = 0; i < self.tabBtns.count; i++) {
-        UIButton *b = self.tabBtns[i];
-        BOOL on = [tabs[i] isEqualToString:self.tab];
-        b.backgroundColor = on ? [UIColor colorWithRed:0.16 green:0.18 blue:0.22 alpha:1]
-                              : [UIColor colorWithWhite:0.11 alpha:1];
-        b.layer.borderWidth = on ? 1 : 0;
-        b.layer.borderColor = AC.CGColor;
-        [b setTitleColor:(on ? AC : IK) forState:UIControlStateNormal];
+static void Install(void) {
+    Class C = objc_getClass("SVProgressHUD");
+    if (!C) { NSLog(@"[hud] 无 SVProgressHUD"); return; }
+    SEL s1 = NSSelectorFromString(@"showWithStatus:");
+    Method m1 = class_getClassMethod(C, s1);
+    if (m1) {
+        o_showStatus = (void(*)(id,SEL,id))method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)n_showStatus);
+        NSLog(@"[hud] showWithStatus 已拦");
     }
-
-    NSDictionary *map = @{
-        @"视觉": @[@"显示方框", @"显示骨骼", @"显示射线", @"显示血量", @"显示名字", @"显示距离", @"雷达", @"本地雷达"],
-        @"自瞄": @[@"启用自瞄", @"瞄准头部", @"强制锁定", @"开镜瞄准", @"掩体判断"],
-        @"枪械": @[@"步枪", @"冲锋枪", @"狙击枪", @"霰弹枪", @"压枪", @"枪口补偿"],
-        @"设置": @[@"锁定菜单", @"公告弹窗", @"到期时间弹窗", @"配色"]
-    };
-    NSArray *items = map[self.tab];
-    CGFloat y = 0, w = self.content.bounds.size.width;
-    for (NSString *item in items) {
-        UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, y, w - 6, 52)];
-        card.backgroundColor = CD;
-        card.layer.cornerRadius = 10;
-        card.layer.borderWidth = 1;
-        card.layer.borderColor = EG.CGColor;
-        UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(16, 13, w - 120, 24)];
-        l.text = item;
-        l.textColor = IK;
-        l.font = [UIFont systemFontOfSize:16];
-        [card addSubview:l];
-        UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(w - 76, 10, 51, 31)];
-        sw.onTintColor = AC;
-        [card addSubview:sw];
-        [self.content addSubview:card];
-        y += 60;
+    SEL s2 = NSSelectorFromString(@"show");
+    Method m2 = class_getClassMethod(C, s2);
+    if (m2) {
+        o_show = (void(*)(id,SEL))method_getImplementation(m2);
+        method_setImplementation(m2, (IMP)n_show);
+        NSLog(@"[hud] show 已拦");
+    }
+    SEL s3 = NSSelectorFromString(@"showWithMaskType:");
+    Method m3 = class_getClassMethod(C, s3);
+    if (m3) {
+        o_showMask = (void(*)(id,SEL,NSUInteger))method_getImplementation(m3);
+        method_setImplementation(m3, (IMP)n_showMask);
+        NSLog(@"[hud] showWithMaskType 已拦");
     }
 }
-@end
 
-@interface TDGesture : NSObject <UIGestureRecognizerDelegate>
-- (void)onDoubleTap;
-@end
-
-@implementation TDGesture
-- (void)onDoubleTap {
-    if (!gOverlay) return;
-    gShown = !gShown;
-    gOverlay.hidden = !gShown;
-    NSLog(@"[w] menu %@", gShown ? @"on" : @"off");
-}
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
-    CGPoint p = [touch locationInView:g.view];
-    CGFloat h = g.view.bounds.size.height;
-    return (p.x < 160 && p.y > h - 160);
-}
-@end
-
-static TDGesture *gDel = nil;
-
-static void EnsureOverlay(UIView *host) {
-    if (gOverlay && gOverlay.superview == host) return;
-    if (!host) return;
-    TDOverlay *o = [[TDOverlay alloc] initWithFrame:host.bounds];
-    o.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    o.hidden = YES;
-    [host addSubview:o];
-    o.userInteractionEnabled = YES;
-    gOverlay = o;
-
-    if (!gDel) gDel = [[TDGesture alloc] init];
-    UITapGestureRecognizer *g = [[UITapGestureRecognizer alloc] initWithTarget:gDel action:@selector(onDoubleTap)];
-    g.numberOfTapsRequired = 2;
-    g.cancelsTouchesInView = NO;
-    g.delegate = gDel;
-    [host addGestureRecognizer:g];
-    NSLog(@"[w] overlay ready on %@", NSStringFromClass([host class]));
-}
-
-static void (*orig_draw)(id, SEL, id) = NULL;
-static void my_draw(id self, SEL _cmd, id view) {
-    if (orig_draw) orig_draw(self, _cmd, view);
-    static int n = 0;
-    if (n++ % 30 == 0) EnsureOverlay(view);
-}
-
-__attribute__((constructor)) static void w_init(void) {
-    NSLog(@"[w] loaded");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        Class c = objc_getClass("ImGuiHudView");
-        if (!c) { NSLog(@"[w] no class"); return; }
-        SEL s = NSSelectorFromString(@"drawInMTKView:");
-        Method m = class_getInstanceMethod(c, s);
-        if (!m) { NSLog(@"[w] no method"); return; }
-        orig_draw = (void (*)(id, SEL, id))method_getImplementation(m);
-        class_replaceMethod(c, s, (IMP)my_draw, method_getTypeEncoding(m));
-        NSLog(@"[w] hooked");
+__attribute__((constructor)) static void hud_init(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        Install();
     });
 }
 

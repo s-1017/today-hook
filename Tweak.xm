@@ -872,94 +872,70 @@ __attribute__((constructor)) static void todayhook_init(void) {
 }
 
 
-// ImGui 菜单注入：hook ImGui::Render，用宿主 ImGui 画阿联酋风菜单
+// swizzle 渲染回调 + ImGui 第二帧（零代码段改动）
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
-#import <mach/mach.h>
-#include <sys/mman.h>
+#import <objc/runtime.h>
 
-
-#define O_RENDER 0x5f5b74ULL
-#define O_BEGIN 0x5ef8b4ULL
-#define O_END 0x5f5504ULL
-#define O_TEXT 0x5bbec8ULL
-#define O_CHECK 0x5bf518ULL
-
+typedef void (*FnV)(void);
 typedef int (*FnBegin)(const char*, bool*, int);
 typedef void (*FnEnd)(void);
+typedef void (*FnBool)(const char*, bool*);
 typedef void (*FnText)(const char*, ...);
-typedef void (*FnCheck)(const char*, bool*);
 
+static FnV fNewFrame, fEndFrame, fRender;
+static FnBegin fBegin; static FnEnd fEnd; static FnBool fCheck; static FnText fText;
+static BOOL gReady = NO, gShow = YES;
+static bool bBox=YES, bBone=YES, bRay=NO, bAim=NO;
 
-static void FlushCode(const void *addr, size_t len) {
-    uint64_t ctr = 0;
-    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
-    size_t line = (size_t)(4 << ((ctr >> 16) & 0xF));
-    const char *p = (const char *)addr;
-    for (size_t i = 0; i < len; i += line) {
-        asm volatile("dc cvau, %0" :: "r"(p + i) : "memory");
-    }
-    asm volatile("dsb ish" ::: "memory");
-    for (size_t i = 0; i < len; i += line) {
-        asm volatile("ic ivau, %0" :: "r"(p + i) : "memory");
-    }
-    asm volatile("dsb ish\n isb" ::: "memory");
+static void Resolve(void) {
+    if (gReady) return;
+    uintptr_t s = _dyld_get_image_vmaddr_slide(0);
+    if (!s) return;
+    uintptr_t b = s + 0x100000000ULL;
+    fNewFrame=(FnV)(b+0x5ea10c); fEndFrame=(FnV)(b+0x5f48dc); fRender=(FnV)(b+0x5f5b74);
+    fBegin=(FnBegin)(b+0x5ef8b4); fEnd=(FnEnd)(b+0x5f5504);
+    fCheck=(FnBool)(b+0x5bf518); fText=(FnText)(b+0x5bbec8);
+    gReady=YES;
+    NSLog(@"[s] resolved newframe=%p render=%p", fNewFrame, fRender);
 }
 
-static FnBegin pBegin; static FnEnd pEnd; static FnText pText; static FnCheck pCheck;
-static void *gTramp; static bool gShow = true;
-static bool bBox=true, bBone=true, bRay=false, bAim=false, bSingle=false;
-
-static void DrawMenu(void) {
-    pBegin("Today", NULL, 0);
-    pText("VISUALS");
-    pCheck("display box", &bBox);
-    pCheck("display bone", &bBone);
-    pCheck("display ray", &bRay);
-    pText("AIM");
-    pCheck("enable aim", &bAim);
-    pCheck("single shot", &bSingle);
-    pEnd();
+static void DrawOur(void) {
+    if (!gReady || !gShow) return;
+    @try {
+        fNewFrame();
+        fBegin("Today", NULL, 0);
+        fText("VISUALS");
+        fCheck("box", &bBox);
+        fCheck("bone", &bBone);
+        fCheck("ray", &bRay);
+        fText("AIM");
+        fCheck("aim", &bAim);
+        fEnd();
+        fRender();
+        NSLog(@"[s] drew our menu");
+    } @catch (NSException *e) { NSLog(@"[s] draw ex %@", e); }
 }
 
-static void Stub(void) {
-    if (gShow && pBegin) { @try { DrawMenu(); } @catch (NSException *e) {} }
-    ((void(*)(void))gTramp)();
+static void (*orig_draw)(id, SEL, id) = NULL;
+static void my_draw(id self, SEL _cmd, id view) {
+    if (orig_draw) orig_draw(self, _cmd, view);
+    Resolve();
+    DrawOur();
 }
 
-static void DoHook(void) {
-    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
-    if (!slide) return;
-    uintptr_t base = slide + 0x100000000ULL;
-    void *render = (void*)(base + O_RENDER);
-    pBegin = (FnBegin)(base + O_BEGIN); pEnd = (FnEnd)(base + O_END);
-    pText = (FnText)(base + O_TEXT); pCheck = (FnCheck)(base + O_CHECK);
-    gTramp = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANON, -1, 0);
-    if (gTramp == MAP_FAILED) return;
-    unsigned char *t = (unsigned char*)gTramp;
-    memcpy(t, render, 16);
-    uint64_t back = (uint64_t)render + 16;
-    t[16]=0x50;t[17]=0x00;t[18]=0x00;t[19]=0x58;
-    t[20]=0x00;t[21]=0x02;t[22]=0x1F;t[23]=0xD6;
-    memcpy(t+24,&back,8);
-    FlushCode(gTramp, 64);
-    kern_return_t kr = vm_protect(mach_task_self(),(vm_address_t)render,4096,false,
-                                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY|VM_PROT_EXECUTE);
-    NSLog(@"[m] vm_protect=%d", kr);
-    if (kr != KERN_SUCCESS) return;
-    unsigned char p[16];
-    p[0]=0x50;p[1]=0x00;p[2]=0x00;p[3]=0x58;
-    p[4]=0x00;p[5]=0x02;p[6]=0x1F;p[7]=0xD6;
-    uint64_t st=(uint64_t)&Stub; memcpy(p+8,&st,8);
-    memcpy(render,p,16);
-    FlushCode(render, 16);
-    NSLog(@"[m] Render hooked stub=%p", &Stub);
-}
-
-__attribute__((constructor)) static void im_init(void) {
-    NSLog(@"[m] imgui menu loaded");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ /* DoHook disabled */ });
+__attribute__((constructor)) static void s_init(void) {
+    NSLog(@"[s] loaded");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        Class c = objc_getClass("ImGuiHudView");
+        if (!c) { NSLog(@"[s] no ImGuiHudView"); return; }
+        SEL sel = NSSelectorFromString(@"drawInMTKView:");
+        Method m = class_getInstanceMethod(c, sel);
+        if (!m) { NSLog(@"[s] no drawInMTKView:"); return; }
+        orig_draw = (void(*)(id,SEL,id))method_getImplementation(m);
+        class_replaceMethod(c, sel, (IMP)my_draw, method_getTypeEncoding(m));
+        NSLog(@"[s] swizzled drawInMTKView");
+    });
 }
 

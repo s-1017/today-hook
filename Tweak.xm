@@ -874,41 +874,36 @@ __attribute__((constructor)) static void todayhook_init(void) {
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
-#import <objc/message.h>
 
-// 通用拦截：所有 show* 类方法一律吞掉
-static void GenericShow(id self, SEL _cmd) {
-    NSLog(@"[hud] swallowed %@", NSStringFromSelector(_cmd));
-}
-
-static void InstallAll(void) {
-    Class C = objc_getClass("SVProgressHUD");
-    if (!C) { NSLog(@"[hud] no class"); return; }
-    Class M = object_getClass(C);
-    unsigned int n = 0;
-    Method *ms = class_copyMethodList(M, &n);
-    int cnt = 0;
-    for (unsigned int i = 0; i < n; i++) {
-        SEL s = method_getName(ms[i]);
-        NSString *name = NSStringFromSelector(s);
-        if ([name hasPrefix:@"show"]) {
-            method_setImplementation(ms[i], (IMP)GenericShow);
-            cnt++;
-        }
+static void Walk(UIView *v, int depth) {
+    if (!v || depth > 8) return;
+    NSString *pad = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (l.text.length) NSLog(@"[v] %@L %@ = %@", pad, NSStringFromClass([v class]), l.text);
+    } else if ([v isKindOfClass:[UIImageView class]] || [v isKindOfClass:[UIActivityIndicatorView class]]) {
+        NSLog(@"[v] %@%@ frame=%@", pad, NSStringFromClass([v class]), NSStringFromCGRect(v.frame));
+    } else if (v.subviews.count == 0) {
+        // 叶子节点，跳过
+    } else {
+        NSLog(@"[v] %@%@ frame=%@", pad, NSStringFromClass([v class]), NSStringFromCGRect(v.frame));
     }
-    free(ms);
-    NSLog(@"[hud] hijacked %d show* methods", cnt);
+    for (UIView *s in v.subviews) Walk(s, depth + 1);
 }
 
-__attribute__((constructor)) static void hud_init(void) {
-    InstallAll();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        InstallAll();
-        Class C = objc_getClass("SVProgressHUD");
-        SEL d = NSSelectorFromString(@"dismiss");
-        if (C && [C respondsToSelector:d]) ((void(*)(id,SEL))objc_msgSend)(C, d);
-        NSLog(@"[hud] boot dismiss done");
-    });
+__attribute__((constructor)) static void v_init(void) {
+    for (int i = 1; i <= 12; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIWindow *w = nil;
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *x in ((UIWindowScene *)sc).windows) { if (x.isKeyWindow) { w = x; break; } }
+                }
+                if (w) break;
+            }
+            if (!w) w = [UIApplication sharedApplication].keyWindow;
+            if (w) { NSLog(@"[v] === tick %d win=%@ ===", i, NSStringFromClass([w class])); Walk(w, 0); }
+        });
+    }
 }
 

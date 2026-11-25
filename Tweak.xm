@@ -882,6 +882,7 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
+#include <sys/mman.h>
 
 #define O_RENDER 0x5f5b74ULL
 #define O_BEGIN 0x5ef8b4ULL

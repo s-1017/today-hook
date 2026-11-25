@@ -878,6 +878,7 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #include <sys/mman.h>
+#include <libkern/OSCacheControl.h>
 
 #define O_RENDER 0x5f5b74ULL
 #define O_BEGIN 0x5ef8b4ULL
@@ -926,7 +927,7 @@ static void DoHook(void) {
     t[16]=0x50;t[17]=0x00;t[18]=0x00;t[19]=0x58;
     t[20]=0x00;t[21]=0x02;t[22]=0x1F;t[23]=0xD6;
     memcpy(t+24,&back,8);
-    __builtin___clear_cache((char*)gTramp,(char*)gTramp+64);
+    sys_icache_invalidate(gTramp, 64);
     kern_return_t kr = vm_protect(mach_task_self(),(vm_address_t)render,4096,false,
                                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY|VM_PROT_EXECUTE);
     NSLog(@"[m] vm_protect=%d", kr);
@@ -936,7 +937,7 @@ static void DoHook(void) {
     p[4]=0x00;p[5]=0x02;p[6]=0x1F;p[7]=0xD6;
     uint64_t st=(uint64_t)&Stub; memcpy(p+8,&st,8);
     memcpy(render,p,16);
-    __builtin___clear_cache((char*)render,(char*)render+16);
+    sys_icache_invalidate(render, 16);
     NSLog(@"[m] Render hooked stub=%p", &Stub);
 }
 

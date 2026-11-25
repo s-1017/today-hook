@@ -875,34 +875,43 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-static void Walk(UIView *v, int depth) {
-    if (!v || depth > 8) return;
-    NSString *pad = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
-    if ([v isKindOfClass:[UILabel class]]) {
-        UILabel *l = (UILabel *)v;
-        if (l.text.length) NSLog(@"[v] %@L %@ = %@", pad, NSStringFromClass([v class]), l.text);
-    } else if ([v isKindOfClass:[UIImageView class]] || [v isKindOfClass:[UIActivityIndicatorView class]]) {
-        NSLog(@"[v] %@%@ frame=%@", pad, NSStringFromClass([v class]), NSStringFromCGRect(v.frame));
-    } else if (v.subviews.count == 0) {
-        // 叶子节点，跳过
-    } else {
-        NSLog(@"[v] %@%@ frame=%@", pad, NSStringFromClass([v class]), NSStringFromCGRect(v.frame));
+static UIWindow *KeyWin(void) {
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if ([sc isKindOfClass:[UIWindowScene class]]) {
+                for (UIWindow *w in ((UIWindowScene *)sc).windows) if (w.isKeyWindow) return w;
+            }
+        }
     }
-    for (UIView *s in v.subviews) Walk(s, depth + 1);
+    return [UIApplication sharedApplication].keyWindow;
 }
 
-__attribute__((constructor)) static void v_init(void) {
-    for (int i = 1; i <= 12; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            UIWindow *w = nil;
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *x in ((UIWindowScene *)sc).windows) { if (x.isKeyWindow) { w = x; break; } }
-                }
-                if (w) break;
+static NSInteger KillLoading(UIView *v, NSInteger hits) {
+    for (UIView *s in [v.subviews copy]) {
+        if ([s isKindOfClass:[UILabel class]]) {
+            NSString *t = ((UILabel *)s).text;
+            if ([t containsString:@"安全"] || [t containsString:@"模块"] || [t containsString:@"加载"]) {
+                UIView *box = s.superview;              // 114x146 容器
+                UIView *white = box.superview;          // 全屏白底
+                box.hidden = YES;
+                if (white && white != v) white.hidden = YES;
+                NSLog(@"[k] hidden loading box");
+                hits++;
+                continue;
             }
-            if (!w) w = [UIApplication sharedApplication].keyWindow;
-            if (w) { NSLog(@"[v] === tick %d win=%@ ===", i, NSStringFromClass([w class])); Walk(w, 0); }
+        }
+        hits = KillLoading(s, hits);
+    }
+    return hits;
+}
+
+__attribute__((constructor)) static void k_init(void) {
+    for (int i = 0; i < 40; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIWindow *w = KeyWin();
+            if (!w) return;
+            NSInteger n = KillLoading(w, 0);
+            if (n > 0) NSLog(@"[k] tick %d removed %ld", i, (long)n);
         });
     }
 }

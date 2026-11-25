@@ -926,8 +926,17 @@ static void Install(void) {
 }
 
 __attribute__((constructor)) static void hud_init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        Install();
+    Install();                                  // 启动瞬间就装
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        Install();                              // 再补一次（类可能晚加载）
+        Class C = objc_getClass("SVProgressHUD");
+        if (C) {
+            SEL dm = NSSelectorFromString(@"dismiss");
+            if ([C respondsToSelector:dm]) {
+                ((void(*)(id,SEL))objc_msgSend)(C, dm);
+                NSLog(@"[hud] dismissed on boot");
+            }
+        }
     });
 }
 

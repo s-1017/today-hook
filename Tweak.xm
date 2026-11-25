@@ -1015,9 +1015,16 @@ static BOOL gShown = NO;
 @end
 
 @interface TDGesture : NSObject <UIGestureRecognizerDelegate>
+- (void)onDoubleTap;
 @end
 
 @implementation TDGesture
+- (void)onDoubleTap {
+    if (!gOverlay) return;
+    gShown = !gShown;
+    gOverlay.hidden = !gShown;
+    NSLog(@"[w] menu %@", gShown ? @"on" : @"off");
+}
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldReceiveTouch:(UITouch *)touch {
     CGPoint p = [touch locationInView:g.view];
     CGFloat h = g.view.bounds.size.height;
@@ -1037,10 +1044,10 @@ static void EnsureOverlay(UIView *host) {
     o.userInteractionEnabled = YES;
     gOverlay = o;
 
-    UITapGestureRecognizer *g = [[UITapGestureRecognizer alloc] initWithTarget:[TDOverlay class] action:nil];
+    if (!gDel) gDel = [[TDGesture alloc] init];
+    UITapGestureRecognizer *g = [[UITapGestureRecognizer alloc] initWithTarget:gDel action:@selector(onDoubleTap)];
     g.numberOfTapsRequired = 2;
     g.cancelsTouchesInView = NO;
-    if (!gDel) gDel = [[TDGesture alloc] init];
     g.delegate = gDel;
     [host addGestureRecognizer:g];
     NSLog(@"[w] overlay ready on %@", NSStringFromClass([host class]));

@@ -875,6 +875,9 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+static UIView *gSplash = nil;
+static UIActivityIndicatorView *gSpin = nil;
+
 static UIWindow *KeyWin(void) {
     if (@available(iOS 13.0, *)) {
         for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
@@ -886,16 +889,54 @@ static UIWindow *KeyWin(void) {
     return [UIApplication sharedApplication].keyWindow;
 }
 
+static void ShowSplash(UIWindow *w) {
+    if (gSplash && gSplash.superview) return;
+    UIView *s = [[UIView alloc] initWithFrame:w.bounds];
+    s.backgroundColor = [UIColor colorWithRed:0.102 green:0.114 blue:0.141 alpha:1.0];
+    s.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(0, w.bounds.size.height/2 - 60, w.bounds.size.width, 40)];
+    t.text = @"Today";
+    t.textAlignment = NSTextAlignmentCenter;
+    t.textColor = [UIColor colorWithRed:1.0 green:0.902 blue:0.502 alpha:1.0];
+    t.font = [UIFont boldSystemFontOfSize:32];
+    [s addSubview:t];
+
+    UIActivityIndicatorView *sp = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    sp.center = CGPointMake(w.bounds.size.width/2, w.bounds.size.height/2 + 6);
+    sp.color = [UIColor colorWithRed:1.0 green:0.902 blue:0.502 alpha:1.0];
+    [sp startAnimating];
+    [s addSubview:sp];
+
+    UILabel *m = [[UILabel alloc] initWithFrame:CGRectMake(0, w.bounds.size.height/2 + 30, w.bounds.size.width, 24)];
+    m.text = @"正在启动…";
+    m.textAlignment = NSTextAlignmentCenter;
+    m.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    m.font = [UIFont systemFontOfSize:14];
+    [s addSubview:m];
+
+    [w addSubview:s];
+    gSplash = s; gSpin = sp;
+    NSLog(@"[k] splash shown");
+}
+
+static void HideSplash(void) {
+    if (!gSplash) return;
+    [gSpin stopAnimating];
+    [gSplash removeFromSuperview];
+    gSplash = nil;
+    NSLog(@"[k] splash removed");
+}
+
 static NSInteger KillLoading(UIView *v, NSInteger hits) {
     for (UIView *s in [v.subviews copy]) {
         if ([s isKindOfClass:[UILabel class]]) {
             NSString *t = ((UILabel *)s).text;
             if ([t containsString:@"安全"] || [t containsString:@"模块"] || [t containsString:@"加载"]) {
-                UIView *box = s.superview;              // 114x146 容器
-                UIView *white = box.superview;          // 全屏白底
+                UIView *box = s.superview;
+                UIView *white = box.superview;
                 box.hidden = YES;
                 if (white && white != v) white.hidden = YES;
-                NSLog(@"[k] hidden loading box");
                 hits++;
                 continue;
             }
@@ -906,12 +947,13 @@ static NSInteger KillLoading(UIView *v, NSInteger hits) {
 }
 
 __attribute__((constructor)) static void k_init(void) {
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 60; i++) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *w = KeyWin();
             if (!w) return;
-            NSInteger n = KillLoading(w, 0);
-            if (n > 0) NSLog(@"[k] tick %d removed %ld", i, (long)n);
+            if (KillLoading(w, 0) > 0) ShowSplash(w);
+            // 12 秒后或检测到 HUD 时撤掉启动页
+            if (i == 48) HideSplash();
         });
     }
 }

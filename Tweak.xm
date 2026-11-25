@@ -876,6 +876,7 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 static BOOL IsBlocked(id status) {
     if (![status isKindOfClass:[NSString class]]) return YES;   // 无文字也拦

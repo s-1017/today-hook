@@ -878,7 +878,7 @@ __attribute__((constructor)) static void todayhook_init(void) {
 #import <mach-o/dyld.h>
 #import <mach/mach.h>
 #include <sys/mman.h>
-#include <libkern/OSCacheControl.h>
+
 
 #define O_RENDER 0x5f5b74ULL
 #define O_BEGIN 0x5ef8b4ULL
@@ -890,6 +890,22 @@ typedef int (*FnBegin)(const char*, bool*, int);
 typedef void (*FnEnd)(void);
 typedef void (*FnText)(const char*, ...);
 typedef void (*FnCheck)(const char*, bool*);
+
+
+static void FlushCode(const void *addr, size_t len) {
+    uint64_t ctr = 0;
+    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    size_t line = (size_t)(4 << ((ctr >> 16) & 0xF));
+    const char *p = (const char *)addr;
+    for (size_t i = 0; i < len; i += line) {
+        asm volatile("dc cvau, %0" :: "r"(p + i) : "memory");
+    }
+    asm volatile("dsb ish" ::: "memory");
+    for (size_t i = 0; i < len; i += line) {
+        asm volatile("ic ivau, %0" :: "r"(p + i) : "memory");
+    }
+    asm volatile("dsb ish\n isb" ::: "memory");
+}
 
 static FnBegin pBegin; static FnEnd pEnd; static FnText pText; static FnCheck pCheck;
 static void *gTramp; static bool gShow = true;
@@ -927,7 +943,7 @@ static void DoHook(void) {
     t[16]=0x50;t[17]=0x00;t[18]=0x00;t[19]=0x58;
     t[20]=0x00;t[21]=0x02;t[22]=0x1F;t[23]=0xD6;
     memcpy(t+24,&back,8);
-    sys_icache_invalidate(gTramp, 64);
+    FlushCode(gTramp, 64);
     kern_return_t kr = vm_protect(mach_task_self(),(vm_address_t)render,4096,false,
                                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY|VM_PROT_EXECUTE);
     NSLog(@"[m] vm_protect=%d", kr);
@@ -937,7 +953,7 @@ static void DoHook(void) {
     p[4]=0x00;p[5]=0x02;p[6]=0x1F;p[7]=0xD6;
     uint64_t st=(uint64_t)&Stub; memcpy(p+8,&st,8);
     memcpy(render,p,16);
-    sys_icache_invalidate(render, 16);
+    FlushCode(render, 16);
     NSLog(@"[m] Render hooked stub=%p", &Stub);
 }
 

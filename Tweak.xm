@@ -872,72 +872,43 @@ __attribute__((constructor)) static void todayhook_init(void) {
 }
 
 
-// 屏蔽 App 自带的 SVProgressHUD 加载层（"安全模块加载中"）
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-static BOOL IsBlocked(id status) {
-    if (![status isKindOfClass:[NSString class]]) return YES;   // 无文字也拦
-    NSString *s = (NSString *)status;
-    return [s containsString:@"安全"] || [s containsString:@"加载"] || [s containsString:@"模块"] || s.length == 0;
+// 通用拦截：所有 show* 类方法一律吞掉
+static void GenericShow(id self, SEL _cmd) {
+    NSLog(@"[hud] swallowed %@", NSStringFromSelector(_cmd));
 }
 
-static void (*o_showStatus)(id, SEL, id) = NULL;
-static void n_showStatus(id self, SEL _cmd, id status) {
-    if (IsBlocked(status)) { NSLog(@"[hud] blocked: %@", status); return; }
-    if (o_showStatus) o_showStatus(self, _cmd, status);
-}
-
-static void (*o_show)(id, SEL) = NULL;
-static void n_show(id self, SEL _cmd) {
-    NSLog(@"[hud] blocked show()");      // 无文字的纯加载层也拦
-}
-
-static void (*o_showMask)(id, SEL, NSUInteger) = NULL;
-static void n_showMask(id self, SEL _cmd, NSUInteger t) {
-    NSLog(@"[hud] blocked showWithMaskType");
-}
-
-static void Install(void) {
+static void InstallAll(void) {
     Class C = objc_getClass("SVProgressHUD");
-    if (!C) { NSLog(@"[hud] 无 SVProgressHUD"); return; }
-    SEL s1 = NSSelectorFromString(@"showWithStatus:");
-    Method m1 = class_getClassMethod(C, s1);
-    if (m1) {
-        o_showStatus = (void(*)(id,SEL,id))method_getImplementation(m1);
-        method_setImplementation(m1, (IMP)n_showStatus);
-        NSLog(@"[hud] showWithStatus 已拦");
+    if (!C) { NSLog(@"[hud] no class"); return; }
+    Class M = object_getClass(C);
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(M, &n);
+    int cnt = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        SEL s = method_getName(ms[i]);
+        NSString *name = NSStringFromSelector(s);
+        if ([name hasPrefix:@"show"]) {
+            method_setImplementation(ms[i], (IMP)GenericShow);
+            cnt++;
+        }
     }
-    SEL s2 = NSSelectorFromString(@"show");
-    Method m2 = class_getClassMethod(C, s2);
-    if (m2) {
-        o_show = (void(*)(id,SEL))method_getImplementation(m2);
-        method_setImplementation(m2, (IMP)n_show);
-        NSLog(@"[hud] show 已拦");
-    }
-    SEL s3 = NSSelectorFromString(@"showWithMaskType:");
-    Method m3 = class_getClassMethod(C, s3);
-    if (m3) {
-        o_showMask = (void(*)(id,SEL,NSUInteger))method_getImplementation(m3);
-        method_setImplementation(m3, (IMP)n_showMask);
-        NSLog(@"[hud] showWithMaskType 已拦");
-    }
+    free(ms);
+    NSLog(@"[hud] hijacked %d show* methods", cnt);
 }
 
 __attribute__((constructor)) static void hud_init(void) {
-    Install();                                  // 启动瞬间就装
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        Install();                              // 再补一次（类可能晚加载）
+    InstallAll();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        InstallAll();
         Class C = objc_getClass("SVProgressHUD");
-        if (C) {
-            SEL dm = NSSelectorFromString(@"dismiss");
-            if ([C respondsToSelector:dm]) {
-                ((void(*)(id,SEL))objc_msgSend)(C, dm);
-                NSLog(@"[hud] dismissed on boot");
-            }
-        }
+        SEL d = NSSelectorFromString(@"dismiss");
+        if (C && [C respondsToSelector:d]) ((void(*)(id,SEL))objc_msgSend)(C, d);
+        NSLog(@"[hud] boot dismiss done");
     });
 }
 

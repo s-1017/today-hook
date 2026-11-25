@@ -1,4 +1,4 @@
-// Tweak.xm —— Today 自有授权层 v7（在线校验 + 离线兜底 + 远程作废）
+﻿// Tweak.xm —— Today 自有授权层 v7（在线校验 + 离线兜底 + 远程作废）
 //
 // 流程：
 //   启动/验证 → 请求 https://服务器/api/v1/activate?code=&device=
@@ -875,3 +875,78 @@ __attribute__((constructor)) static void todayhook_init(void) {
     });
     
 }
+
+
+// ImGui 菜单注入：hook ImGui::Render，用宿主 ImGui 画阿联酋风菜单
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <mach-o/dyld.h>
+#import <mach/mach.h>
+
+#define O_RENDER 0x5f5b74ULL
+#define O_BEGIN 0x5ef8b4ULL
+#define O_END 0x5f5504ULL
+#define O_TEXT 0x5bbec8ULL
+#define O_CHECK 0x5bf518ULL
+
+typedef int (*FnBegin)(const char*, bool*, int);
+typedef void (*FnEnd)(void);
+typedef void (*FnText)(const char*, ...);
+typedef void (*FnCheck)(const char*, bool*);
+
+static FnBegin pBegin; static FnEnd pEnd; static FnText pText; static FnCheck pCheck;
+static void *gTramp; static bool gShow = true;
+static bool bBox=true, bBone=true, bRay=false, bAim=false, bSingle=false;
+
+static void DrawMenu(void) {
+    pBegin("Today", NULL, 0);
+    pText("VISUALS");
+    pCheck("display box", &bBox);
+    pCheck("display bone", &bBone);
+    pCheck("display ray", &bRay);
+    pText("AIM");
+    pCheck("enable aim", &bAim);
+    pCheck("single shot", &bSingle);
+    pEnd();
+}
+
+static void Stub(void) {
+    if (gShow && pBegin) { @try { DrawMenu(); } @catch (NSException *e) {} }
+    ((void(*)(void))gTramp)();
+}
+
+static void DoHook(void) {
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    if (!slide) return;
+    uintptr_t base = slide + 0x100000000ULL;
+    void *render = (void*)(base + O_RENDER);
+    pBegin = (FnBegin)(base + O_BEGIN); pEnd = (FnEnd)(base + O_END);
+    pText = (FnText)(base + O_TEXT); pCheck = (FnCheck)(base + O_CHECK);
+    gTramp = mmap(NULL, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANON, -1, 0);
+    if (gTramp == MAP_FAILED) return;
+    unsigned char *t = (unsigned char*)gTramp;
+    memcpy(t, render, 16);
+    uint64_t back = (uint64_t)render + 16;
+    t[16]=0x50;t[17]=0x00;t[18]=0x00;t[19]=0x58;
+    t[20]=0x00;t[21]=0x02;t[22]=0x1F;t[23]=0xD6;
+    memcpy(t+24,&back,8);
+    __builtin___clear_cache((char*)gTramp,(char*)gTramp+64);
+    kern_return_t kr = vm_protect(mach_task_self(),(vm_address_t)render,4096,false,
+                                  VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY|VM_PROT_EXECUTE);
+    NSLog(@"[m] vm_protect=%d", kr);
+    if (kr != KERN_SUCCESS) return;
+    unsigned char p[16];
+    p[0]=0x50;p[1]=0x00;p[2]=0x00;p[3]=0x58;
+    p[4]=0x00;p[5]=0x02;p[6]=0x1F;p[7]=0xD6;
+    uint64_t st=(uint64_t)&Stub; memcpy(p+8,&st,8);
+    memcpy(render,p,16);
+    __builtin___clear_cache((char*)render,(char*)render+16);
+    NSLog(@"[m] Render hooked stub=%p", &Stub);
+}
+
+__attribute__((constructor)) static void im_init(void) {
+    NSLog(@"[m] imgui menu loaded");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(7.0*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ DoHook(); });
+}
+

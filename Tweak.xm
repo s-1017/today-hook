@@ -874,6 +874,47 @@ __attribute__((constructor)) static void todayhook_init(void) {
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+
+// 通用拦截：所有 show* 类方法一律吞掉
+static void GenericShow(id self, SEL _cmd) {
+    NSLog(@"[hud] swallowed %@", NSStringFromSelector(_cmd));
+}
+
+static void InstallAll(void) {
+    Class C = objc_getClass("SVProgressHUD");
+    if (!C) { NSLog(@"[hud] no class"); return; }
+    Class M = object_getClass(C);
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(M, &n);
+    int cnt = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        SEL s = method_getName(ms[i]);
+        NSString *name = NSStringFromSelector(s);
+        if ([name hasPrefix:@"show"]) {
+            method_setImplementation(ms[i], (IMP)GenericShow);
+            cnt++;
+        }
+    }
+    free(ms);
+    NSLog(@"[hud] hijacked %d show* methods", cnt);
+}
+
+__attribute__((constructor)) static void hud_init(void) {
+    InstallAll();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        InstallAll();
+        Class C = objc_getClass("SVProgressHUD");
+        SEL d = NSSelectorFromString(@"dismiss");
+        if (C && [C respondsToSelector:d]) ((void(*)(id,SEL))objc_msgSend)(C, d);
+        NSLog(@"[hud] boot dismiss done");
+    });
+}
+
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 static UIView *gSplash = nil;
 static UIActivityIndicatorView *gSpin = nil;
